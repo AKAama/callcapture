@@ -13,6 +13,7 @@ class JobRequest(BaseModel, frozen=True):
 
     job_id: str = Field(description="UUID string identifying this job")
     command: Literal["transcribe", "postprocess", "export"]
+    recording_type: Literal["call_meeting", "voice_memo", "lecture"] = "call_meeting"
     audio_path: str
     engine: Literal["local_whisper", "remote"] = "local_whisper"
     language: str = "auto"
