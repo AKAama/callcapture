@@ -96,6 +96,15 @@ final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v2_recordingTypeAndAnalysis") { db in
+            try db.alter(table: "session") { table in
+                table.add(column: "recording_type", .text)
+                    .notNull()
+                    .defaults(to: "call_meeting")
+                table.add(column: "analysis_path", .text)
+            }
+        }
+
         return migrator
     }
 }
