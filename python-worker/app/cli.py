@@ -60,11 +60,7 @@ def _run_pipeline(request: JobRequest) -> JobResult:
 
     report_progress(request.job_id, 0.5, "postprocessing")
 
-    note = generate_markdown(
-        segments,
-        profile=request.markdown_profile,
-        llm_engine=request.llm_engine,
-    )
+    note = generate_markdown(segments, profile=request.markdown_profile)
 
     rendered = render_markdown(note, profile=request.markdown_profile)
 
@@ -163,7 +159,7 @@ def postprocess() -> None:
         from app.schemas.models import TranscriptSegment
         segments = [TranscriptSegment.model_validate(s) for s in seg_data]
 
-        note = generate_markdown(segments, request.markdown_profile, request.llm_engine)
+        note = generate_markdown(segments, request.markdown_profile)
         rendered = render_markdown(note, request.markdown_profile)
         md_path = os.path.splitext(request.audio_path)[0] + "_notes.md"
         write_markdown(rendered, md_path)

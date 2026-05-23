@@ -47,7 +47,6 @@ def _fallback_extraction(
 def generate_markdown(
     segments: list[TranscriptSegment],
     profile: str = "meeting_notes",
-    llm_engine: str = "llm",
 ) -> MarkdownNote:
     """Generate a structured MarkdownNote from transcript segments via the LLM.
 
@@ -58,7 +57,6 @@ def generate_markdown(
     Args:
         segments: Transcript segments.
         profile: Markdown profile (used during rendering).
-        llm_engine: Retained for compatibility.
     """
     base_url = os.environ.get("LLM_BASE_URL", OPENROUTER_BASE_URL)
     model = os.environ.get("LLM_MODEL", "google/gemini-2.5-flash")
@@ -66,7 +64,9 @@ def generate_markdown(
     is_local = "openrouter.ai" not in base_url
 
     if not api_key and not is_local:
-        sys.stderr.write('{"warning": "no LLM_API_KEY for cloud endpoint, using fallback"}\n')
+        sys.stderr.write(
+            json.dumps({"warning": "no LLM_API_KEY for cloud endpoint, using fallback"}) + "\n"
+        )
         sys.stderr.flush()
         return _fallback_extraction(segments)
 

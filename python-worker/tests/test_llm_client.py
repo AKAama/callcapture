@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.postprocess.llm_client import LLMClient, LLMError, OPENROUTER_BASE_URL
 
 
@@ -40,7 +42,6 @@ def test_local_base_url_is_honored():
 
 
 def test_invalid_json_raises():
-    import pytest
     client = LLMClient(api_key="k", model="m")
     with patch.object(client._client.chat.completions, "create",
                       return_value=_fake_completion("not json")):
