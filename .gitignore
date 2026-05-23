@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.coverage
+.ruff_cache/
+.pytest_cache/
+
+# Swift
+.build/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+
+# Built app binary (Info.plist / entitlements are kept as source)
+CallCapture.app/Contents/MacOS/
+
+# macOS
+.DS_Store
+
+# Models (downloaded at runtime)
+models/
+
+# IDE
+.idea/
+.vscode/
+
+# Env
+.env
+.env.local

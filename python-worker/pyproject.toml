@@ -1,0 +1,32 @@
+[project]
+name = "callcapture-worker"
+version = "0.1.0"
+description = "Python worker for macOS call recording app"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pywhispercpp",
+    "anthropic",
+    "openai",
+    "click",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+callcapture = "app.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=app --cov-report=term-missing"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
