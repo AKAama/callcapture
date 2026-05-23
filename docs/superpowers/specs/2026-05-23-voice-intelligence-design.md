@@ -85,10 +85,24 @@ produced from transcription + LLM with a warning; the job does not hard-fail.
 ## 5. LLM via OpenRouter
 
 Replace the direct Anthropic SDK in post-processing with an **OpenAI-compatible
-client** pointed at `https://openrouter.ai/api/v1`. Model is configurable (e.g.
-`anthropic/claude-sonnet-4.6`, `openai/gpt-4o`). API key in Keychain. All LLM
+client** pointed at `https://openrouter.ai/api/v1`. API key in Keychain. All LLM
 calls — note formatting, sentiment, insights — go through one `OpenRouterClient`
 wrapper with retry + JSON-mode parsing.
+
+**Model selection (researched 2026):**
+- **Default `llm_model` = `google/gemini-2.5-flash`** (or `3.5-flash`). Chosen for
+  multilingual transcript→notes: broadest language coverage (100+, strong on
+  Ukrainian/Russian/English), ~20× cheaper than GPT/Claude (~$1/M words vs ~$23),
+  fast, large context for long calls. Cost matters because every recording is
+  processed.
+- **Quality alternative (selectable): `anthropic/claude-sonnet-4.6`** — best
+  instruction-following and structured output; recommended for the insights pass
+  when reasoning/tone matter most.
+- Avoid DeepSeek as default (only ~30-language coverage — unreliable for Cyrillic).
+- Exact slugs are verified against `openrouter.ai/models` during implementation.
+- Optional two-tier config: a cheap model for bulk formatting + a stronger model
+  for insights. v1 ships a single configurable `llm_model` defaulting to Gemini
+  Flash; the two-tier split is a documented seam.
 
 Long transcripts (>~30 min) use hierarchical summarization (chunk → per-chunk
 summary → synthesize), per the existing spec.
@@ -143,7 +157,8 @@ Swift `Session` and `SessionRecord` mirror them.
 - `enable_analysis` (default true)
 - `analysis_provider` = `local` | `assemblyai` | `deepgram` (default `local`;
   only `local` implemented in v1, others are seams)
-- `openrouter_api_key` (Keychain), `llm_model` (string, default a Claude model)
+- `openrouter_api_key` (Keychain), `llm_model` (string, default
+  `google/gemini-2.5-flash`; `anthropic/claude-sonnet-4.6` offered as quality option)
 - `huggingface_token` (Keychain, for pyannote)
 - `default_recording_type`
 - Existing `enable_diarization` folds into per-type profile defaults.
