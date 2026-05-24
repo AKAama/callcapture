@@ -30,9 +30,10 @@ struct BufferSplitTests {
     }
 
     @available(macOS 14.2, *)
-    @Test("returns nil when trailing channels cannot sum to systemChannels")
-    func unsplittable() {
-        // trailing sums: 2, then 2+1=3 — never exactly 3 from a clean buffer boundary for system=3
+    @Test("full buffer set sums to systemChannels -> all system, no mic")
+    func fullSumIsAllSystem() {
+        // trailing sums: 2, then 2+1=3 == systemChannels, so the split lands at
+        // the front (index 0) -> everything is treated as system, no mic stem.
         #expect(AudioCaptureManager.systemBufferSplit(channelCounts: [1, 2], systemChannels: 3) == 0)
     }
 }

@@ -204,6 +204,12 @@ final class AudioCaptureManager {
             Self.logger.error("startCapture: AudioDeviceCreateIOProcID failed: \(createStatus)")
             self.converter = nil
             self.fileWriter = nil
+            try? self.micWriter?.finalize()
+            try? self.systemWriter?.finalize()
+            self.micWriter = nil
+            self.systemWriter = nil
+            self.micConverter = nil
+            self.systemConverter = nil
             destroyAggregateDevice()
             destroyTap()
             throw CaptureError.tapCreationFailed(status: createStatus)
@@ -218,6 +224,12 @@ final class AudioCaptureManager {
             self.ioProcID = nil
             self.converter = nil
             self.fileWriter = nil
+            try? self.micWriter?.finalize()
+            try? self.systemWriter?.finalize()
+            self.micWriter = nil
+            self.systemWriter = nil
+            self.micConverter = nil
+            self.systemConverter = nil
             destroyAggregateDevice()
             destroyTap()
             throw CaptureError.tapCreationFailed(status: startStatus)
@@ -408,6 +420,9 @@ final class AudioCaptureManager {
             let split = Self.systemBufferSplit(
                 channelCounts: channelCounts, systemChannels: systemTapChannels
             )
+            if split == 0 && bufferCount == 1 {
+                Self.logger.warning("Mic selected but buffer split found no mic buffers (tapCh=\(self.systemTapChannels)); mic stem will be empty")
+            }
             if split > 0, let micBuf = downmix(abl, indices: 0..<split, frameCount: frameCount, format: mixFormat) {
                 handleAudioBuffer(micBuf, converter: micConverter, outputFormat: targetFormat, writer: micWriter)
             }
