@@ -262,6 +262,27 @@ final class AudioCaptureManager {
         ioProcID = nil
     }
 
+    /// Index into a buffer list at which the system (tap) buffers begin.
+    ///
+    /// The aggregate device lists mic sub-device buffers first, then tap
+    /// buffers. The trailing buffers whose channels sum to `systemChannels`
+    /// are the system stem; everything before them is the mic stem.
+    ///
+    /// - Returns: The split index (system buffers are `index..<count`). Returns
+    ///   `0` (treat everything as system) if no clean split sums to
+    ///   `systemChannels`, which is the safe default for the no-mic case.
+    static func systemBufferSplit(channelCounts: [Int], systemChannels: Int) -> Int {
+        var trailing = 0
+        var index = channelCounts.count
+        while index > 0 {
+            trailing += channelCounts[index - 1]
+            index -= 1
+            if trailing == systemChannels { return index }
+            if trailing > systemChannels { break }
+        }
+        return 0
+    }
+
     /// Handles one IO callback. The aggregate may deliver several separate
     /// float32 buffers (e.g. the system-audio tap and a mic stream). All of
     /// them are summed/averaged into a single mono buffer (the mix), then
