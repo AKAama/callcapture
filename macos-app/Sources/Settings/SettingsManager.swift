@@ -30,6 +30,23 @@ final class SettingsManager {
         }
     }
 
+    var llmProvider: LLMProvider = .openrouter { didSet { persist("llm_provider", llmProvider.rawValue) } }
+
+    var openRouterApiKey: String = "" {
+        didSet {
+            KeychainHelper.save(openRouterApiKey, for: "openrouter_api_key")
+            persist("openrouter_api_key", "keychain")
+        }
+    }
+
+    var llmModel: String = "google/gemini-2.5-flash" {
+        didSet { persist("llm_model", llmModel) }
+    }
+
+    var localLLMBaseURL: String = "http://localhost:11434/v1" {
+        didSet { persist("local_llm_base_url", localLLMBaseURL) }
+    }
+
     var outputDirectory: String = defaultOutputDirectory { didSet { persist("output_directory", outputDirectory) } }
     var obsidianExportDirectory: String = "" { didSet { persist("obsidian_export_directory", obsidianExportDirectory) } }
     var obsidianFolderPattern: String = "_meetings/{YYYY-MM}/" { didSet { persist("obsidian_folder_pattern", obsidianFolderPattern) } }
@@ -106,10 +123,14 @@ final class SettingsManager {
         if let raw = rows["auto_process_on_stop"] { autoProcessOnStop = raw == "true" }
         if let raw = rows["keep_separate_mic_track"] { keepSeparateMicTrack = raw == "true" }
         if let raw = rows["markdown_profile"], let val = MarkdownProfile(rawValue: raw) { markdownProfile = val }
+        if let raw = rows["llm_provider"], let val = LLMProvider(rawValue: raw) { llmProvider = val }
+        if let raw = rows["llm_model"], !raw.isEmpty { llmModel = raw }
+        if let raw = rows["local_llm_base_url"], !raw.isEmpty { localLLMBaseURL = raw }
 
         // API keys live in Keychain, not SQLite.
         remoteApiKey = KeychainHelper.load(for: "remote_api_key")
         llmApiKey = KeychainHelper.load(for: "llm_api_key")
+        openRouterApiKey = KeychainHelper.load(for: "openrouter_api_key")
 
         Self.logger.info("Settings loaded (\(rows.count) persisted keys)")
     }

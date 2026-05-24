@@ -58,6 +58,19 @@ enum LLMEngine: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Where LLM post-processing runs.
+enum LLMProvider: String, Codable, CaseIterable, Sendable {
+    case openrouter
+    case local
+
+    var displayName: String {
+        switch self {
+        case .openrouter: "OpenRouter (cloud)"
+        case .local: "Local (Ollama)"
+        }
+    }
+}
+
 /// Markdown output profile for transcript formatting.
 enum MarkdownProfile: String, Codable, CaseIterable, Sendable {
     case meetingNotes = "meeting_notes"
