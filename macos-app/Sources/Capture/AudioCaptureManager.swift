@@ -32,6 +32,13 @@ final class AudioCaptureManager {
     private var targetFormat: AVAudioFormat?
     /// Converts mix-format buffers to the target format.
     private var converter: AVAudioConverter?
+    /// Separate-stem writers, created only when a mic is selected.
+    private var micWriter: AudioFileWriter?
+    private var systemWriter: AudioFileWriter?
+    private var micConverter: AVAudioConverter?
+    private var systemConverter: AVAudioConverter?
+    /// Channel count of the system tap, used to split the IO buffer list.
+    private var systemTapChannels: Int = 0
     /// Counts buffers delivered by the IO proc, for first-buffer diagnostics.
     private var bufferCount = 0
 
@@ -153,6 +160,25 @@ final class AudioCaptureManager {
         self.converter = converter
         self.fileWriter = writer
         self.bufferCount = 0
+
+        // Record the tap channel count so the IO proc can split mic vs system.
+        self.systemTapChannels = Self.tapChannelCount(tapID: self.tapID)
+
+        // When a mic is mixed in, also write separate mic/system stems for
+        // later diarization. Named alongside the mixed file.
+        if micDeviceUID != nil {
+            let dir = outputPath.deletingLastPathComponent()
+            let stem = outputPath.deletingPathExtension().lastPathComponent  // "<id>"
+            let micURL = dir.appendingPathComponent("\(stem)_mic.wav")
+            let systemURL = dir.appendingPathComponent("\(stem)_system.wav")
+            // Both filenames end in `.wav` so AVAudioFile writes RIFF/WAV (a
+            // non-`.wav` extension would silently produce CAF).
+            self.micWriter = try AudioFileWriter(outputPath: micURL, format: outputFormat)
+            self.systemWriter = try AudioFileWriter(outputPath: systemURL, format: outputFormat)
+            self.micConverter = AVAudioConverter(from: mixFormat, to: outputFormat)
+            self.systemConverter = AVAudioConverter(from: mixFormat, to: outputFormat)
+            Self.logger.info("startCapture: writing mic+system stems (tapCh=\(self.systemTapChannels))")
+        }
 
         // Install an IO proc on the aggregate device. Unlike
         // AVAudioEngine.installTap (which does not reliably pull audio from a
@@ -414,6 +440,20 @@ final class AudioCaptureManager {
     }
 
     // MARK: - Device Utilities
+
+    /// Reads the channel count of a process tap's stream format.
+    private static func tapChannelCount(tapID: AudioObjectID) -> Int {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &asbd)
+        guard status == noErr, asbd.mChannelsPerFrame > 0 else { return 2 }
+        return Int(asbd.mChannelsPerFrame)
+    }
 
     /// Reads the combined input stream format of an audio device.
     ///
