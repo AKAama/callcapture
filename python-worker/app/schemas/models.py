@@ -40,6 +40,7 @@ class JobResult(BaseModel, frozen=True):
     status: Literal["completed", "failed", "error"]
     raw_transcript_path: str | None = None
     markdown_path: str | None = None
+    analysis_path: str | None = None
     duration_sec: float | None = None
     warnings: list[str] = Field(default_factory=list)
     error_message: str | None = None
@@ -52,6 +53,36 @@ class TranscriptSegment(BaseModel, frozen=True):
     end: float
     text: str
     speaker: str | None = None
+
+
+class DiarizationTurn(BaseModel, frozen=True):
+    """A single speaker turn from the diarization sidecar (system stem)."""
+
+    speaker: str
+    start: float
+    end: float
+
+
+class SpeakerStats(BaseModel, frozen=True):
+    """Per-speaker talk metrics."""
+
+    label: str
+    is_self: bool = False
+    talk_seconds: float = 0.0
+    talk_ratio: float = 0.0
+    words: int = 0
+    words_per_min: float = 0.0
+    turns: int = 0
+    longest_monologue_sec: float = 0.0
+
+
+class ConversationAnalysis(BaseModel, frozen=True):
+    """Per-recording conversation analysis (Phase 3a: speakers + talk metrics)."""
+
+    recording_type: str = "call_meeting"
+    num_speakers: int = 0
+    speakers: list[SpeakerStats] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 _ACTION_ITEM_RE = re.compile(r"^- \[ \] .+$")

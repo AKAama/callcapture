@@ -225,6 +225,10 @@ final class AppModel {
                 markdownPath: result.markdownPath,
                 engineUsed: request.engine
             )
+            sessionManager.updateAnalysisPath(
+                id: session.id,
+                analysisPath: result.analysisPath
+            )
             sessionManager.updateSessionStatus(
                 id: session.id,
                 status: "transcribed"

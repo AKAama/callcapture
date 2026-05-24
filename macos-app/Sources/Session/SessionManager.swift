@@ -237,6 +237,26 @@ final class SessionManager {
         }
     }
 
+    /// Persists the analysis JSON path for a session.
+    ///
+    /// - Parameters:
+    ///   - id: Session identifier.
+    ///   - analysisPath: Path to the conversation analysis JSON file.
+    func updateAnalysisPath(id: String, analysisPath: String?) {
+        do {
+            try database.dbPool.write { db in
+                guard var record = try SessionRecord.fetchOne(db, key: id) else {
+                    Self.logger.warning("Session not found for analysis path update: \(id)")
+                    return
+                }
+                record.analysisPath = analysisPath
+                try record.update(db)
+            }
+        } catch {
+            Self.logger.error("Failed to update analysis path for \(id): \(error)")
+        }
+    }
+
     /// Updates the status (and optional error message) for a session.
     ///
     /// - Parameters:

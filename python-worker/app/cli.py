@@ -10,11 +10,19 @@ from typing import Any
 
 import click
 
+from app.analyze.attribution import attribute_segments
+from app.analyze.diarization import load_diarization_turns
+from app.analyze.metrics import compute_speaker_stats
 from app.export.writer import write_markdown, write_raw_transcript
 from app.postprocess.formatter import render_markdown
 from app.postprocess.markdown import generate_markdown
-from app.schemas.models import JobRequest, JobResult
-from app.transcribe.engine import transcribe
+from app.schemas.models import (
+    ConversationAnalysis,
+    JobRequest,
+    JobResult,
+    TranscriptSegment,
+)
+from app.transcribe.engine import transcribe, transcribe_path
 from app.utils.progress import report_progress, report_result
 
 _shutdown_requested = False
@@ -43,13 +51,52 @@ def _check_ping(raw: str) -> bool:
     return False
 
 
+def _transcribe_and_attribute(request: JobRequest) -> list[TranscriptSegment]:
+    """Transcribe stems when present (mic = You, system = remote, attributed by
+    the diarization sidecar), else transcribe the single mixed file as remote."""
+    base = os.path.splitext(request.audio_path)[0]
+    mic_path = f"{base}_mic.wav"
+    system_path = f"{base}_system.wav"
+
+    if os.path.exists(mic_path) and os.path.exists(system_path):
+        mic_segments = transcribe_path(mic_path, request)
+        system_segments = transcribe_path(system_path, request)
+        turns = load_diarization_turns(system_path)
+        return attribute_segments(mic_segments, system_segments, turns, self_label="You")
+
+    # No stems: transcribe the mixed/single file.
+    segments = transcribe(request)
+    if request.recording_type == "voice_memo":
+        # A solo memo is the user speaking.
+        return attribute_segments(segments, [], None, self_label="You")
+    turns = load_diarization_turns(request.audio_path)
+    return attribute_segments([], segments, turns, self_label="You")
+
+
+def _write_analysis(request: JobRequest, segments: list[TranscriptSegment]) -> str:
+    """Build and write `<base>_analysis.json`; return its path."""
+    speakers = compute_speaker_stats(segments, self_label="You")
+    analysis = ConversationAnalysis(
+        recording_type=request.recording_type,
+        num_speakers=len(speakers),
+        speakers=speakers,
+    )
+    base = os.path.splitext(request.audio_path)[0]
+    analysis_path = f"{base}_analysis.json"
+    tmp = analysis_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(analysis.model_dump_json(indent=2))
+    os.replace(tmp, analysis_path)
+    return analysis_path
+
+
 def _run_pipeline(request: JobRequest) -> JobResult:
     """Execute the full transcribe -> postprocess -> export pipeline."""
     warnings: list[str] = []
 
     report_progress(request.job_id, 0.0, "starting")
 
-    segments = transcribe(request)
+    segments = _transcribe_and_attribute(request)
     if not segments:
         return JobResult(
             job_id=request.job_id,
@@ -57,6 +104,8 @@ def _run_pipeline(request: JobRequest) -> JobResult:
             error_message="No transcript segments produced",
             warnings=warnings,
         )
+
+    analysis_path = _write_analysis(request, segments)
 
     report_progress(request.job_id, 0.5, "postprocessing")
 
@@ -85,6 +134,7 @@ def _run_pipeline(request: JobRequest) -> JobResult:
         status="completed",
         raw_transcript_path=raw_path,
         markdown_path=md_path,
+        analysis_path=analysis_path,
         duration_sec=duration_sec,
         warnings=warnings,
     )
@@ -156,7 +206,6 @@ def postprocess() -> None:
         transcript_path = os.path.splitext(request.audio_path)[0] + "_transcript.json"
         with open(transcript_path, encoding="utf-8") as f:
             seg_data = json.load(f)
-        from app.schemas.models import TranscriptSegment
         segments = [TranscriptSegment.model_validate(s) for s in seg_data]
 
         note = generate_markdown(segments, request.markdown_profile)

@@ -98,6 +98,7 @@ struct JobResult: Codable, Sendable {
     let status: String
     let rawTranscriptPath: String?
     let markdownPath: String?
+    let analysisPath: String?
     let durationSec: Double?
     let warnings: [String]
     let errorMessage: String?
@@ -107,6 +108,7 @@ struct JobResult: Codable, Sendable {
         case status
         case rawTranscriptPath = "raw_transcript_path"
         case markdownPath = "markdown_path"
+        case analysisPath = "analysis_path"
         case durationSec = "duration_sec"
         case warnings
         case errorMessage = "error_message"
@@ -119,6 +121,7 @@ struct JobResult: Codable, Sendable {
             status: "error",
             rawTranscriptPath: nil,
             markdownPath: nil,
+            analysisPath: nil,
             durationSec: nil,
             warnings: [message],
             errorMessage: message
