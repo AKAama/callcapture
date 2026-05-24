@@ -33,6 +33,7 @@ struct DiarizationServiceTests {
             audioPath: dir.appendingPathComponent("sess.wav").path,
             recordingType: type, status: "completed"
         )
+        try Data().write(to: URL(fileURLWithPath: session.audioPath))
         return (dir, session)
     }
 
@@ -86,6 +87,13 @@ struct DiarizationServiceTests {
 
         #expect(fake.diarizeCalls == [URL(fileURLWithPath: session.audioPath)])
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("sess_diarization.json").path))
+    }
+
+    @Test @available(macOS 14.2, *) func prepareModelsDelegatesToProvider() async throws {
+        let fake = FakeDiarizationProvider()
+        let service = DiarizationService(provider: fake)
+        try await service.prepareModels()
+        #expect(fake.prepareCount == 1)
     }
 
     @Test @available(macOS 14.2, *) func swallowsProviderErrorAndWritesNoSidecar() async throws {
