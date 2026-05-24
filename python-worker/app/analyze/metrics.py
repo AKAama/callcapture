@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.analyze.attribution import _DEFAULT_REMOTE_SPEAKER
 from app.schemas.models import SpeakerStats, TranscriptSegment
 
 
@@ -27,7 +28,7 @@ def compute_speaker_stats(
     prev_speaker: str | None = None
 
     for s in segments:
-        label = s.speaker or "Speaker 1"
+        label = s.speaker or _DEFAULT_REMOTE_SPEAKER
         if label not in seconds:
             order.append(label)
             seconds[label] = 0.0

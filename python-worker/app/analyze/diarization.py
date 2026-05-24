@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 from app.schemas.models import DiarizationTurn
 
@@ -27,5 +28,7 @@ def load_diarization_turns(audio_path: str) -> list[DiarizationTurn] | None:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return [DiarizationTurn.model_validate(t) for t in data.get("turns", [])]
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        sys.stderr.write(json.dumps({"warning": f"diarization sidecar unreadable: {exc}"}) + "\n")
+        sys.stderr.flush()
         return None

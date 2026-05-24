@@ -27,23 +27,7 @@ def transcribe(
     Raises:
         RuntimeError: If transcription fails for any reason.
     """
-    try:
-        if request.engine == "local_whisper":
-            return transcribe_local(
-                audio_path=request.audio_path,
-                model=request.whisper_model,
-                language=request.language,
-                job_id=request.job_id,
-            )
-        else:
-            return transcribe_remote(
-                audio_path=request.audio_path,
-                provider=request.remote_provider,
-                language=request.language,
-                job_id=request.job_id,
-            )
-    except Exception as exc:
-        raise RuntimeError(f"Transcription failed ({request.engine}): {exc}") from exc
+    return transcribe_path(request.audio_path, request, progress_callback)
 
 
 def transcribe_path(

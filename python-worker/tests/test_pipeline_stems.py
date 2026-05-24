@@ -47,3 +47,21 @@ def test_no_stems_falls_back_to_single_file(tmp_path):
         segments = cli._transcribe_and_attribute(request)
 
     assert segments[0].speaker == "Speaker 1"
+
+
+def test_no_stems_voice_memo_is_self(tmp_path):
+    from app import cli
+
+    audio = tmp_path / "memo.wav"
+    audio.write_bytes(b"")
+    request = JobRequest(
+        job_id="j",
+        command="transcribe",
+        audio_path=str(audio),
+        recording_type="voice_memo",
+    )
+
+    with patch("app.cli.transcribe", return_value=[_seg(0.0, 3.0, "just me talking")]):
+        segments = cli._transcribe_and_attribute(request)
+
+    assert segments[0].speaker == "You"

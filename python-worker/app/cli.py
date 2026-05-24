@@ -64,8 +64,11 @@ def _transcribe_and_attribute(request: JobRequest) -> list[TranscriptSegment]:
         turns = load_diarization_turns(system_path)
         return attribute_segments(mic_segments, system_segments, turns, self_label="You")
 
-    # No stems: transcribe the mixed file; attribute remote via sidecar if any.
+    # No stems: transcribe the mixed/single file.
     segments = transcribe(request)
+    if request.recording_type == "voice_memo":
+        # A solo memo is the user speaking.
+        return attribute_segments(segments, [], None, self_label="You")
     turns = load_diarization_turns(request.audio_path)
     return attribute_segments([], segments, turns, self_label="You")
 
