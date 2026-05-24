@@ -236,12 +236,19 @@ final class AudioCaptureManager {
 
         stopIOProc()
 
+        try? micWriter?.finalize()
+        try? systemWriter?.finalize()
+
         do {
             try fileWriter?.finalize()
         } catch {
             Self.logger.error("File finalization failed: \(error)")
             fileWriter = nil
             converter = nil
+            micWriter = nil
+            systemWriter = nil
+            micConverter = nil
+            systemConverter = nil
             destroyAggregateDevice()
             destroyTap()
             isRecording = false
@@ -250,6 +257,10 @@ final class AudioCaptureManager {
 
         fileWriter = nil
         converter = nil
+        micWriter = nil
+        systemWriter = nil
+        micConverter = nil
+        systemConverter = nil
         destroyAggregateDevice()
         destroyTap()
         isRecording = false
@@ -270,8 +281,14 @@ final class AudioCaptureManager {
         stopIOProc()
 
         try? fileWriter?.finalize()
+        try? micWriter?.finalize()
+        try? systemWriter?.finalize()
         fileWriter = nil
         converter = nil
+        micWriter = nil
+        systemWriter = nil
+        micConverter = nil
+        systemConverter = nil
 
         destroyAggregateDevice()
         destroyTap()
