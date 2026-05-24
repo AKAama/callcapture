@@ -65,14 +65,7 @@ struct SettingsView: View {
                 )
             }
 
-            if settings.llmEngine != .localExperimental {
-                SecureField(
-                    "\(settings.llmEngine.displayName) API Key",
-                    text: $settings.llmApiKey
-                )
-            }
-
-            if settings.defaultEngine != .remote && settings.llmEngine == .localExperimental {
+            if settings.defaultEngine != .remote && settings.llmProvider == .local {
                 Text("No API keys required for current configuration.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
