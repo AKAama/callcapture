@@ -14,12 +14,14 @@ from app.analyze.attribution import attribute_segments
 from app.analyze.diarization import load_diarization_turns
 from app.analyze.metrics import compute_speaker_stats
 from app.export.writer import write_markdown, write_raw_transcript
-from app.postprocess.formatter import render_markdown
+from app.analyze.sentiment import analyze_sentiment
+from app.postprocess.formatter import render_markdown, render_sentiment_section
 from app.postprocess.markdown import generate_markdown
 from app.schemas.models import (
     ConversationAnalysis,
     JobRequest,
     JobResult,
+    Sentiment,
     TranscriptSegment,
 )
 from app.transcribe.engine import transcribe, transcribe_path
@@ -73,13 +75,18 @@ def _transcribe_and_attribute(request: JobRequest) -> list[TranscriptSegment]:
     return attribute_segments([], segments, turns, self_label="You")
 
 
-def _write_analysis(request: JobRequest, segments: list[TranscriptSegment]) -> str:
+def _write_analysis(
+    request: JobRequest,
+    segments: list[TranscriptSegment],
+    sentiment: Sentiment | None = None,
+) -> str:
     """Build and write `<base>_analysis.json`; return its path."""
     speakers = compute_speaker_stats(segments, self_label="You")
     analysis = ConversationAnalysis(
         recording_type=request.recording_type,
         num_speakers=len(speakers),
         speakers=speakers,
+        sentiment=sentiment,
     )
     base = os.path.splitext(request.audio_path)[0]
     analysis_path = f"{base}_analysis.json"
@@ -105,13 +112,17 @@ def _run_pipeline(request: JobRequest) -> JobResult:
             warnings=warnings,
         )
 
-    analysis_path = _write_analysis(request, segments)
+    sentiment = analyze_sentiment(segments)
+    analysis_path = _write_analysis(request, segments, sentiment)
 
     report_progress(request.job_id, 0.5, "postprocessing")
 
     note = generate_markdown(segments, profile=request.markdown_profile)
 
     rendered = render_markdown(note, profile=request.markdown_profile)
+    section = render_sentiment_section(sentiment)
+    if section:
+        rendered = f"{rendered}\n{section}"
 
     report_progress(request.job_id, 0.8, "exporting")
 

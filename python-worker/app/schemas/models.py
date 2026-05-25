@@ -76,6 +76,22 @@ class SpeakerStats(BaseModel, frozen=True):
     longest_monologue_sec: float = 0.0
 
 
+class SpeakerSentiment(BaseModel, frozen=True):
+    """Per-speaker sentiment from the LLM."""
+
+    label: str = "neutral"  # positive | neutral | negative | mixed
+    score: float = 0.0       # -1.0 (very negative) .. 1.0 (very positive)
+
+
+class Sentiment(BaseModel, frozen=True):
+    """Conversation sentiment (Phase 4a: text/LLM; `arc` populated in Phase 4b)."""
+
+    overall: str = "neutral"  # positive | neutral | negative | mixed
+    overall_score: float = 0.0
+    by_speaker: dict[str, SpeakerSentiment] = Field(default_factory=dict)
+    arc: list[float] = Field(default_factory=list)
+
+
 class ConversationAnalysis(BaseModel, frozen=True):
     """Per-recording conversation analysis (Phase 3a: speakers + talk metrics)."""
 
@@ -83,6 +99,7 @@ class ConversationAnalysis(BaseModel, frozen=True):
     num_speakers: int = 0
     speakers: list[SpeakerStats] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    sentiment: Sentiment | None = None
 
 
 _ACTION_ITEM_RE = re.compile(r"^- \[ \] .+$")
