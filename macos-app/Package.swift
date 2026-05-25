@@ -9,7 +9,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4")
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", .upToNextMinor(from: "0.14.7"))
     ],
     targets: [
         .executableTarget(

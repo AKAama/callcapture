@@ -18,15 +18,16 @@ actor FluidAudioDiarizer: DiarizationProvider {
     }
 
     func diarize(audioPath: URL) async throws -> [DiarizationTurn] {
-        let manager = try await loadedManager()
-        let result = try await manager.process(audioPath)
+        let mgr = try await loadedManager()
+        let result = try await mgr.process(audioPath)
         let raw = result.segments.map { segment in
             RawSpeakerTurn(
-                clusterId: String(describing: segment.speakerId),
+                clusterId: segment.speakerId,
                 start: Double(segment.startTimeSeconds),
                 end: Double(segment.endTimeSeconds)
             )
         }
+        Self.logger.debug("Diarized \(raw.count) segments from \(audioPath.lastPathComponent)")
         return normalizeTurns(raw)
     }
 
@@ -37,6 +38,7 @@ actor FluidAudioDiarizer: DiarizationProvider {
         let created = OfflineDiarizerManager(config: OfflineDiarizerConfig())
         try await created.prepareModels()
         manager = created
+        Self.logger.info("FluidAudio diarizer models loaded")
         return created
     }
 }
