@@ -107,15 +107,11 @@ struct SettingsView: View {
     @ViewBuilder
     private func speakerSection(settings: SettingsManager) -> some View {
         @Bindable var settings = settings
-        Section("Speaker Options") {
-            HStack {
-                Toggle("Speaker diarization", isOn: .constant(false))
-                    .disabled(true)
-                Text("Coming in v1.1")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
+        Section("Speaker Diarization") {
+            DiarizationModelsRow(
+                service: appModel.diarizationService,
+                modelsReady: $settings.diarizationModelsReady
+            )
             Toggle("Keep separate mic track", isOn: $settings.keepSeparateMicTrack)
         }
     }
@@ -181,5 +177,64 @@ private struct DirectoryPickerRow: View {
             return "~" + fullPath.dropFirst(home.count)
         }
         return fullPath
+    }
+}
+
+/// Shows diarization-model status and an explicit download button. Diarization
+/// only runs once models are downloaded (see DiarizationService gating).
+@available(macOS 14.2, *)
+private struct DiarizationModelsRow: View {
+    let service: DiarizationService
+    @Binding var modelsReady: Bool
+
+    @State private var isDownloading = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Models")
+                Spacer()
+                statusLabel
+            }
+            Button(isDownloading ? "Downloading…" : "Download diarization models") {
+                download()
+            }
+            .disabled(isDownloading || modelsReady)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            Text("Required to separate speakers in Call/Meeting recordings. Downloads once (~tens of MB); recordings still produce notes without it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        if isDownloading {
+            Text("Downloading…").font(.caption).foregroundStyle(.secondary)
+        } else if modelsReady {
+            Text("Ready").font(.caption).foregroundStyle(.green)
+        } else {
+            Text("Not downloaded").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func download() {
+        isDownloading = true
+        errorMessage = nil
+        Task {
+            do {
+                try await service.prepareModels()
+                modelsReady = true
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isDownloading = false
+        }
     }
 }
