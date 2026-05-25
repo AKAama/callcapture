@@ -9,6 +9,11 @@ dependencies = [
     "anthropic",
     "openai",
     "click",
+    "numpy",
+    "audonnx",
+    "audeer",
+    "audiofile",
+    "onnxruntime",
 ]
 
 [project.optional-dependencies]
