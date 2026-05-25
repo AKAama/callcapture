@@ -52,6 +52,23 @@ struct JobRequest: Codable, Sendable {
         )
     }
 
+    /// Creates a request that asks the worker to download the acoustic-emotion model.
+    static func prepareEmotion() -> JobRequest {
+        JobRequest(
+            jobId: UUID().uuidString,
+            command: "prepare_emotion",
+            audioPath: "",
+            engine: "local_whisper",
+            language: "auto",
+            speakerDiarization: false,
+            markdownProfile: "meeting_notes",
+            whisperModel: "base",
+            llmEngine: "claude",
+            remoteProvider: "groq",
+            recordingType: "call_meeting"
+        )
+    }
+
     /// Creates a transcription request configured from a session and settings.
     ///
     /// - Parameters:

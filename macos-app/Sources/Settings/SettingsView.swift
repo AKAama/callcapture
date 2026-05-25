@@ -112,6 +112,10 @@ struct SettingsView: View {
                 service: appModel.diarizationService,
                 modelsReady: $settings.diarizationModelsReady
             )
+            EmotionModelsRow(
+                bridge: appModel.pythonBridge,
+                modelsReady: $settings.emotionModelsReady
+            )
             Toggle("Keep separate mic track", isOn: $settings.keepSeparateMicTrack)
         }
     }
@@ -177,6 +181,67 @@ private struct DirectoryPickerRow: View {
             return "~" + fullPath.dropFirst(home.count)
         }
         return fullPath
+    }
+}
+
+/// Shows acoustic-emotion model status and a download button. The model lives in the
+/// Python worker, so the download runs the `prepare_emotion` worker command via the bridge.
+@available(macOS 14.2, *)
+private struct EmotionModelsRow: View {
+    let bridge: PythonBridge
+    @Binding var modelsReady: Bool
+
+    @State private var isDownloading = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Emotion model")
+                Spacer()
+                statusLabel
+            }
+            Button(isDownloading ? "Downloading…" : "Download emotion model") {
+                download()
+            }
+            .disabled(isDownloading || modelsReady)
+
+            if let errorMessage {
+                Text(errorMessage).font(.caption).foregroundStyle(.red)
+            }
+            Text("Adds per-speaker emotion (valence/arousal) and an emotional arc. Large one-time download (~1 GB); analysis still runs without it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        if isDownloading {
+            Text("Downloading…").font(.caption).foregroundStyle(.secondary)
+        } else if modelsReady {
+            Text("Ready").font(.caption).foregroundStyle(.green)
+        } else {
+            Text("Not downloaded").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func download() {
+        isDownloading = true
+        errorMessage = nil
+        Task {
+            do {
+                let result = try await bridge.runJob(request: .prepareEmotion())
+                if result.status == "completed" {
+                    modelsReady = true
+                } else {
+                    errorMessage = result.errorMessage ?? "Download failed"
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isDownloading = false
+        }
     }
 }
 
