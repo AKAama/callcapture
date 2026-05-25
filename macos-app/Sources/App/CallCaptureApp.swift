@@ -79,6 +79,7 @@ final class AppModel {
     let sessionManager: SessionManager
     let settingsManager: SettingsManager
     let pythonBridge = PythonBridge()
+    let diarizationService = DiarizationService(provider: FluidAudioDiarizer())
 
     /// The in-flight auto-transcription task, retained so the user can cancel it.
     @ObservationIgnored
@@ -198,6 +199,14 @@ final class AppModel {
             "LLM_MODEL": settingsManager.llmModel,
             "LLM_API_KEY": llmKey,
         ]
+
+        // Diarize the remote audio and write the turns sidecar the worker reads,
+        // before transcription. No-ops unless the recording type diarizes and
+        // models are downloaded; never blocks or fails transcription.
+        await diarizationService.diarizeIfNeeded(
+            session: session,
+            modelsReady: settingsManager.diarizationModelsReady
+        )
 
         do {
             let result = try await pythonBridge.runJob(request: request)

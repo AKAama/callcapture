@@ -53,6 +53,7 @@ final class SettingsManager {
     var enableDiarization: Bool = false { didSet { persist("enable_diarization", String(enableDiarization)) } }
     var autoProcessOnStop: Bool = true { didSet { persist("auto_process_on_stop", String(autoProcessOnStop)) } }
     var keepSeparateMicTrack: Bool = false { didSet { persist("keep_separate_mic_track", String(keepSeparateMicTrack)) } }
+    var diarizationModelsReady: Bool = false { didSet { persist("diarization_models_ready", String(diarizationModelsReady)) } }
     var markdownProfile: MarkdownProfile = .meetingNotes { didSet { persist("markdown_profile", markdownProfile.rawValue) } }
 
     private let database: AppDatabase
@@ -122,6 +123,7 @@ final class SettingsManager {
         if let raw = rows["enable_diarization"] { enableDiarization = raw == "true" }
         if let raw = rows["auto_process_on_stop"] { autoProcessOnStop = raw == "true" }
         if let raw = rows["keep_separate_mic_track"] { keepSeparateMicTrack = raw == "true" }
+        if let raw = rows["diarization_models_ready"] { diarizationModelsReady = raw == "true" }
         if let raw = rows["markdown_profile"], let val = MarkdownProfile(rawValue: raw) { markdownProfile = val }
         if let raw = rows["llm_provider"], let val = LLMProvider(rawValue: raw) { llmProvider = val }
         if let raw = rows["llm_model"], !raw.isEmpty { llmModel = raw }
