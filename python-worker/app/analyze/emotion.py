@@ -14,6 +14,13 @@ import numpy as np
 
 from app.schemas.models import ArcPoint, TranscriptSegment
 
+
+@dataclass(frozen=True)
+class SpeakerEmotion:
+    valence: float
+    arousal: float
+    dominant_emotion: str
+
 # Tuning constants (see spec §2, §7).
 _TARGET_SR = 16000
 _MIN_SEG_SEC = 0.5
@@ -100,3 +107,88 @@ def predict_vad(signal: np.ndarray, sampling_rate: int) -> tuple[float, float, f
     logits = _model(signal, sampling_rate)["logits"][0]
     arousal, dominance, valence = float(logits[0]), float(logits[1]), float(logits[2])
     return valence, arousal, dominance
+
+
+def _stem_for(speaker: str, audio_path: str) -> str:
+    """Audio file holding a speaker's voice: You -> mic stem, others -> system stem,
+    falling back to the mixed file when a stem is absent."""
+    base = os.path.splitext(audio_path)[0]
+    stem = f"{base}_mic.wav" if speaker == "You" else f"{base}_system.wav"
+    return stem if os.path.exists(stem) else audio_path
+
+
+def compute_speaker_emotion(
+    segments: list[TranscriptSegment],
+    audio_path: str,
+) -> dict[str, SpeakerEmotion]:
+    """Duration-weighted per-speaker valence/arousal over each speaker's segments.
+
+    Segments < `_MIN_SEG_SEC` are skipped; each is clipped to `_MAX_SEG_SEC`; total
+    inferred audio per speaker is capped at `_MAX_TOTAL_SEC_PER_SPEAKER` (longest
+    segments first). SER inference and audio reading are the mocked seams.
+    """
+    by_speaker: dict[str, list[TranscriptSegment]] = {}
+    for s in segments:
+        if (s.end - s.start) < _MIN_SEG_SEC:
+            continue
+        by_speaker.setdefault(s.speaker or "Speaker 1", []).append(s)
+
+    result: dict[str, SpeakerEmotion] = {}
+    for speaker, segs in by_speaker.items():
+        path = _stem_for(speaker, audio_path)
+        try:
+            signal, sr = _read_audio(path)
+        except Exception:  # noqa: BLE001 - degrade per-speaker on read failure
+            continue
+        # Longest segments first, capped to the per-speaker budget.
+        ordered = sorted(segs, key=lambda s: s.end - s.start, reverse=True)
+        budget = _MAX_TOTAL_SEC_PER_SPEAKER
+        v_sum = a_sum = w_sum = 0.0
+        for s in ordered:
+            if budget <= 0:
+                break
+            clip = slice_signal(signal, sr, s.start, s.end, max_sec=min(_MAX_SEG_SEC, budget))
+            dur = len(clip) / sr if sr else 0.0
+            if dur < _MIN_SEG_SEC:
+                continue
+            valence, arousal, _ = predict_vad(clip, sr)
+            v_sum += valence * dur
+            a_sum += arousal * dur
+            w_sum += dur
+            budget -= dur
+        if w_sum <= 0:
+            continue
+        valence = v_sum / w_sum
+        arousal = a_sum / w_sum
+        result[speaker] = SpeakerEmotion(
+            valence=round(valence, 4),
+            arousal=round(arousal, 4),
+            dominant_emotion=dominant_emotion(valence, arousal),
+        )
+    return result
+
+
+def compute_arc(
+    audio_path: str,
+    window_sec: float = _ARC_WINDOW_SEC,
+    max_windows: int = _ARC_MAX_WINDOWS,
+) -> list[ArcPoint]:
+    """Acoustic-valence arc over the mixed recording, ≤ `max_windows` windows."""
+    try:
+        signal, sr = _read_audio(audio_path)
+    except Exception:  # noqa: BLE001 - no arc on read failure
+        return []
+    total_sec = len(signal) / sr if sr else 0.0
+    if total_sec <= 0:
+        return []
+    n = min(max_windows, max(1, int(total_sec // window_sec) or 1))
+    step = total_sec / n
+    points: list[ArcPoint] = []
+    for i in range(n):
+        start = i * step
+        clip = slice_signal(signal, sr, start, start + step, max_sec=window_sec)
+        if len(clip) == 0:
+            continue
+        valence, _, _ = predict_vad(clip, sr)
+        points.append(ArcPoint(t=round(start + step / 2.0, 2), score=round(2.0 * valence - 1.0, 4)))
+    return points
