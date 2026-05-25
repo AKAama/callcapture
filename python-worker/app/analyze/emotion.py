@@ -22,7 +22,6 @@ class SpeakerEmotion:
     dominant_emotion: str
 
 # Tuning constants (see spec §2, §7).
-_TARGET_SR = 16000
 _MIN_SEG_SEC = 0.5
 _MAX_SEG_SEC = 30.0
 _MAX_TOTAL_SEC_PER_SPEAKER = 300.0
@@ -181,7 +180,9 @@ def compute_arc(
     total_sec = len(signal) / sr if sr else 0.0
     if total_sec <= 0:
         return []
-    n = min(max_windows, max(1, int(total_sec // window_sec) or 1))
+    # Floor division: recordings in (window_sec, 2*window_sec) yield n=1 (first window only).
+    # When total > max_windows*window_sec, step > window_sec so t is the nominal (not sampled) window center.
+    n = min(max_windows, max(1, int(total_sec // window_sec)))
     step = total_sec / n
     points: list[ArcPoint] = []
     for i in range(n):

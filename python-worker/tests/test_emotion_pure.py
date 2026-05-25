@@ -49,3 +49,10 @@ def test_is_emotion_model_ready(tmp_path, monkeypatch):
     assert emotion.is_emotion_model_ready() is False
     (tmp_path / "model.yaml").write_text("meta")
     assert emotion.is_emotion_model_ready() is True
+
+
+def test_slice_signal_returns_empty_when_start_past_end():
+    sr = 16000
+    sig = np.zeros(sr * 2, dtype=np.float32)  # 2s
+    out = slice_signal(sig, sr, start=5.0, end=6.0)  # start past end of signal
+    assert len(out) == 0
