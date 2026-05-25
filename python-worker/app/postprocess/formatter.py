@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.schemas.models import MarkdownNote
+from app.schemas.models import MarkdownNote, Sentiment
 
 
 def _render_meeting_notes(note: MarkdownNote) -> str:
@@ -123,3 +123,24 @@ def render_markdown(note: MarkdownNote, profile: str = "meeting_notes") -> str:
     if renderer is None:
         raise ValueError(f"Unknown profile: {profile!r}. Supported: {list(_RENDERERS)}")
     return renderer(note)
+
+
+def render_sentiment_section(sentiment: Sentiment | None) -> str:
+    """Render a minimal '## Sentiment' markdown block, or '' when sentiment is absent.
+
+    Phase 4a placeholder; Phase 5 folds sentiment into the per-type note shapes.
+    """
+    if sentiment is None:
+        return ""
+
+    lines: list[str] = [
+        "## Sentiment",
+        "",
+        f"**Overall:** {sentiment.overall} ({sentiment.overall_score:+.2f})",
+    ]
+    if sentiment.by_speaker:
+        lines.append("")
+        for label, sp in sentiment.by_speaker.items():
+            lines.append(f"- **{label}:** {sp.label} ({sp.score:+.2f})")
+    lines.append("")
+    return "\n".join(lines)
