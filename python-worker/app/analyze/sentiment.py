@@ -10,7 +10,12 @@ from __future__ import annotations
 import math
 
 from app.postprocess.llm_client import LLMClient, LLMError
-from app.postprocess.llm_env import resolve_llm_env, transcript_text, warn
+from app.postprocess.llm_env import (
+    format_speaker_tone_lines,
+    resolve_llm_env,
+    transcript_text,
+    warn,
+)
 from app.schemas.models import Sentiment, SpeakerSentiment, TranscriptSegment
 
 _VALID_LABELS = {"positive", "neutral", "negative", "mixed"}
@@ -63,20 +68,14 @@ def _neutral_fallback(segments: list[TranscriptSegment]) -> Sentiment:
 
 def _tone_block(emotion: dict | None) -> str:
     """Acoustic-tone context for the prompt, or '' when no emotion is available."""
-    if not emotion:
+    tone_lines = format_speaker_tone_lines(emotion)
+    if not tone_lines:  # no emotion, or nothing parseable
         return ""
-    lines = ["Vocal tone (acoustic emotion):"]
-    for label, e in emotion.items():
-        try:
-            valence = float(e.get("valence", 0.0))
-            arousal = float(e.get("arousal", 0.0))
-        except (TypeError, ValueError, AttributeError):
-            continue
-        dom = e.get("dominant_emotion", "neutral") if isinstance(e, dict) else "neutral"
-        lines.append(f"- {label} sounded {dom} (valence {valence:.2f}, arousal {arousal:.2f}).")
-    if len(lines) == 1:  # header only — nothing parseable
-        return ""
-    lines.append("Reconcile the text sentiment with this vocal tone.\n")
+    lines = [
+        "Vocal tone (acoustic emotion):",
+        *tone_lines,
+        "Reconcile the text sentiment with this vocal tone.\n",
+    ]
     return "\n".join(lines)
 
 

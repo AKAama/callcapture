@@ -9,7 +9,12 @@ a rule-based fallback that still renders a (sparse) note.
 from __future__ import annotations
 
 from app.postprocess.llm_client import LLMClient, LLMError
-from app.postprocess.llm_env import resolve_llm_env, transcript_text, warn
+from app.postprocess.llm_env import (
+    format_speaker_tone_lines,
+    resolve_llm_env,
+    transcript_text,
+    warn,
+)
 from app.schemas.models import Insights, Sentiment, TranscriptSegment
 
 _CALL_PROMPT = (
@@ -92,15 +97,7 @@ def _context_block(sentiment: Sentiment | None, emotion: dict | None) -> str:
         lines.append(
             f"Overall sentiment: {sentiment.overall} ({sentiment.overall_score:+.2f})."
         )
-    if emotion:
-        for label, e in emotion.items():
-            try:
-                valence = float(e.get("valence", 0.0))
-                arousal = float(e.get("arousal", 0.0))
-            except (TypeError, ValueError, AttributeError):
-                continue
-            dom = e.get("dominant_emotion", "neutral") if isinstance(e, dict) else "neutral"
-            lines.append(f"- {label} sounded {dom} (valence {valence:.2f}, arousal {arousal:.2f}).")
+    lines.extend(format_speaker_tone_lines(emotion))
     if not lines:
         return ""
     return "Context:\n" + "\n".join(lines) + "\n\n"

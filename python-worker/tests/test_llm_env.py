@@ -1,4 +1,10 @@
-from app.postprocess.llm_env import LlmEnv, resolve_llm_env, transcript_text, warn
+from app.postprocess.llm_env import (
+    LlmEnv,
+    format_speaker_tone_lines,
+    resolve_llm_env,
+    transcript_text,
+    warn,
+)
 from app.schemas.models import TranscriptSegment
 
 
@@ -59,3 +65,21 @@ def test_transcript_text_empty():
 def test_warn_writes_json(capsys):
     warn("boom")
     assert '{"warning": "boom"}' in capsys.readouterr().err
+
+
+def test_format_speaker_tone_lines_none_and_empty():
+    assert format_speaker_tone_lines(None) == []
+    assert format_speaker_tone_lines({}) == []
+
+
+def test_format_speaker_tone_lines_formats_entries():
+    emotion = {"You": {"valence": 0.3, "arousal": 0.2, "dominant_emotion": "calm"}}
+    lines = format_speaker_tone_lines(emotion)
+    assert lines == ["- You sounded calm (valence 0.30, arousal 0.20)."]
+
+
+def test_format_speaker_tone_lines_skips_unparseable():
+    emotion = {"Bad": {"valence": "nope"}, "You": {"valence": 0.1, "arousal": 0.1}}
+    lines = format_speaker_tone_lines(emotion)
+    assert len(lines) == 1
+    assert lines[0].startswith("- You sounded neutral")

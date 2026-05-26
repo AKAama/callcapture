@@ -110,3 +110,15 @@ def test_context_block_includes_sentiment_and_tone(monkeypatch):
     user_arg = fake.complete_json.call_args.kwargs["user"]
     assert "Overall sentiment: positive" in user_arg
     assert "You sounded calm" in user_arg
+
+
+def test_no_context_block_when_no_sentiment_or_emotion(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    fake = MagicMock()
+    fake.complete_json.return_value = {"title": "t", "summary": "s"}
+    with patch("app.analyze.insights.LLMClient", return_value=fake):
+        analyze_insights(_segs(), recording_type="call_meeting")
+    user_arg = fake.complete_json.call_args.kwargs["user"]
+    assert "Context:" not in user_arg
+    assert user_arg.startswith("Transcript:")

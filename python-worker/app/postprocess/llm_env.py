@@ -43,6 +43,27 @@ def warn(message: str) -> None:
     sys.stderr.flush()
 
 
+def format_speaker_tone_lines(emotion: dict | None) -> list[str]:
+    """Per-speaker acoustic-tone lines for an LLM prompt.
+
+    Each line reads `- <label> sounded <emotion> (valence X.XX, arousal X.XX).`.
+    Entries whose valence/arousal can't be read as floats are skipped; returns []
+    for no/empty emotion. Shared by the sentiment and insights analyzers.
+    """
+    if not emotion:
+        return []
+    lines: list[str] = []
+    for label, e in emotion.items():
+        try:
+            valence = float(e.get("valence", 0.0))
+            arousal = float(e.get("arousal", 0.0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        dom = e.get("dominant_emotion", "neutral") if isinstance(e, dict) else "neutral"
+        lines.append(f"- {label} sounded {dom} (valence {valence:.2f}, arousal {arousal:.2f}).")
+    return lines
+
+
 def transcript_text(segments: list[TranscriptSegment], *, timestamps: bool = False) -> str:
     """Speaker-labeled transcript text for an LLM prompt.
 
