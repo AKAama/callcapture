@@ -46,7 +46,14 @@ def test_call_note_sections():
     assert "### Recommended Actions" in out
     assert "### Action Items" in out
     assert "- [ ] call Bob" in out
+    assert "- **You:** positive (+0.60)" in out  # per-speaker sentiment line
     assert "## Transcript" in out
+
+
+def test_frontmatter_escapes_quotes_in_title():
+    ins = Insights(title='Talk about "pricing"', summary="S")
+    out = render_note("voice_memo", ins, None, [], [])
+    assert 'title: "Talk about \\"pricing\\""' in out
 
 
 def test_call_note_omits_empty_sections():

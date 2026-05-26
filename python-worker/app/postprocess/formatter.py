@@ -132,10 +132,12 @@ def render_markdown(note: MarkdownNote, profile: str = "meeting_notes") -> str:
 
 
 def _bullets(items: list[str]) -> list[str]:
+    """Return '- item' lines, skipping empty strings."""
     return [f"- {it}" for it in items if it]
 
 
 def _checkbox_items(items: list[str]) -> list[str]:
+    """Return '- [ ] item' task lines, skipping empty strings."""
     return [f"- [ ] {it}" for it in items if it]
 
 
@@ -153,11 +155,13 @@ def _frontmatter(
     speakers: list[SpeakerStats],
     segments: list[TranscriptSegment],
 ) -> list[str]:
+    """YAML frontmatter lines; `participants` and `sentiment` are omitted when absent."""
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     duration_min = segments[-1].end / 60.0 if segments else 0.0
+    safe_title = insights.title.replace('"', '\\"')
     lines = [
         "---",
-        f'title: "{insights.title}"',
+        f'title: "{safe_title}"',
         f"date: {now}",
         f"recording_type: {recording_type}",
         f"num_speakers: {len(speakers)}",
@@ -254,9 +258,9 @@ def _render_call_body(
 
 def _render_memo_body(
     insights: Insights,
-    sentiment: Sentiment | None,
-    speakers: list[SpeakerStats],
-    segments: list[TranscriptSegment],
+    _sentiment: Sentiment | None,
+    _speakers: list[SpeakerStats],
+    _segments: list[TranscriptSegment],
 ) -> list[str]:
     body: list[str] = [f"# {insights.title}", ""]
     body += _section("## Summary", [insights.summary] if insights.summary else [])
@@ -268,9 +272,9 @@ def _render_memo_body(
 
 def _render_lecture_body(
     insights: Insights,
-    sentiment: Sentiment | None,
-    speakers: list[SpeakerStats],
-    segments: list[TranscriptSegment],
+    _sentiment: Sentiment | None,
+    _speakers: list[SpeakerStats],
+    _segments: list[TranscriptSegment],
 ) -> list[str]:
     body: list[str] = [f"# {insights.title}", ""]
     body += _section("## Outline", _bullets(insights.outline))
