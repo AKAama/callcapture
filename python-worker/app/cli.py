@@ -13,10 +13,10 @@ import click
 from app.analyze.attribution import attribute_segments
 from app.analyze.diarization import load_diarization_turns
 from app.analyze.emotion import SpeakerEmotion, compute_arc, compute_speaker_emotion, is_emotion_model_ready, prepare_emotion_model
-from app.analyze.metrics import compute_speaker_stats
-from app.export.writer import write_markdown, write_raw_transcript
 from app.analyze.insights import analyze_insights
+from app.analyze.metrics import compute_speaker_stats
 from app.analyze.sentiment import analyze_sentiment
+from app.export.writer import write_markdown, write_raw_transcript
 from app.postprocess.formatter import render_markdown, render_note
 from app.postprocess.markdown import generate_markdown
 from app.schemas.models import (

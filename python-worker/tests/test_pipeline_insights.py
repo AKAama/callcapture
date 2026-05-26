@@ -74,3 +74,21 @@ def test_pipeline_passes_recording_type_to_analyze_insights(tmp_path, monkeypatc
         cli._run_pipeline(request)
 
     assert m.call_args.kwargs["recording_type"] == "lecture"
+
+
+def test_pipeline_completes_when_insights_none(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    audio = tmp_path / "sess.wav"
+    audio.write_bytes(b"")
+    request = JobRequest(job_id="j", command="transcribe", audio_path=str(audio))
+
+    with patch("app.cli._transcribe_and_attribute", return_value=_segs()), \
+         patch("app.cli.analyze_insights", return_value=None):
+        result = cli._run_pipeline(request)
+
+    assert result.status == "completed"
+    analysis = json.loads((tmp_path / "sess_analysis.json").read_text())
+    assert analysis["insights"] is None
+    notes = (tmp_path / "sess_notes.md").read_text()
+    assert notes.startswith("---\n")  # note still renders (minimal)

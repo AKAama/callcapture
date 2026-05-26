@@ -133,7 +133,7 @@ class Insights(BaseModel, frozen=True):
 
 
 class ConversationAnalysis(BaseModel, frozen=True):
-    """Per-recording conversation analysis (Phase 3a: speakers + talk metrics)."""
+    """Per-recording conversation analysis (speakers, talk metrics, sentiment, insights)."""
 
     recording_type: str = "call_meeting"
     num_speakers: int = 0
