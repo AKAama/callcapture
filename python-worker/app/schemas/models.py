@@ -102,6 +102,36 @@ class Sentiment(BaseModel, frozen=True):
     arc: list[ArcPoint] = Field(default_factory=list)
 
 
+class Insights(BaseModel, frozen=True):
+    """Type-tailored conversation insights (Phase 5).
+
+    Flat superset: every field is optional with an empty default. Each recording type
+    fills only its relevant subset (call: dynamics/opportunities/recommended_actions/
+    action_items; voice_memo: key_points/action_items/reflections; lecture: outline/
+    key_concepts/qa/takeaways). `summary` and `title` are shared by all types.
+    """
+
+    title: str = "Untitled"
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
+    action_items: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+    dynamics: str = ""
+    opportunities: list[str] = Field(default_factory=list)
+    reflections: list[str] = Field(default_factory=list)
+    outline: list[str] = Field(default_factory=list)
+    key_concepts: list[str] = Field(default_factory=list)
+    qa: list[str] = Field(default_factory=list)
+    takeaways: list[str] = Field(default_factory=list)
+
+    @field_validator("summary")
+    @classmethod
+    def summary_must_be_short(cls, v: str) -> str:
+        if len(v) > 500:
+            raise ValueError("summary must be <500 characters")
+        return v
+
+
 class ConversationAnalysis(BaseModel, frozen=True):
     """Per-recording conversation analysis (Phase 3a: speakers + talk metrics)."""
 
@@ -110,6 +140,7 @@ class ConversationAnalysis(BaseModel, frozen=True):
     speakers: list[SpeakerStats] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     sentiment: Sentiment | None = None
+    insights: Insights | None = None
 
 
 _ACTION_ITEM_RE = re.compile(r"^- \[ \] .+$")
