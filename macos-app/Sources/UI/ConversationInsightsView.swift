@@ -15,7 +15,7 @@ struct ConversationInsightsView: View {
                         .font(.subheadline)
                         .fontWeight(.medium)
                     Spacer()
-                    Text("\(analysis.numSpeakers) speaker\(analysis.numSpeakers == 1 ? "" : "s")")
+                    Text("\(analysis.speakers.count) speaker\(analysis.speakers.count == 1 ? "" : "s")")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -77,7 +77,7 @@ struct ConversationInsightsView: View {
                 .font(.caption)
                 .fontWeight(.medium)
                 .foregroundStyle(.secondary)
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+            ForEach(items, id: \.self) { item in
                 Label {
                     Text(item).font(.caption)
                 } icon: {
