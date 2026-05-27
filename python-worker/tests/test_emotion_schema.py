@@ -1,4 +1,4 @@
-from app.schemas.models import ArcPoint, ConversationAnalysis, Sentiment, SpeakerStats
+from app.schemas.models import ArcPoint, Sentiment, SpeakerStats
 
 
 def test_speaker_stats_emotion_fields_default_none():

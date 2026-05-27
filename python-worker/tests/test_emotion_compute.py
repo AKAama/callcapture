@@ -1,7 +1,7 @@
 import numpy as np
 
 from app.analyze import emotion as emo
-from app.analyze.emotion import SpeakerEmotion, compute_arc, compute_speaker_emotion
+from app.analyze.emotion import compute_arc, compute_speaker_emotion
 from app.schemas.models import TranscriptSegment
 
 
