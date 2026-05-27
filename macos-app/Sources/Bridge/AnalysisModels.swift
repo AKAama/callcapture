@@ -188,3 +188,18 @@ struct ConversationAnalysis: Decodable, Sendable {
         }
     }
 }
+
+/// Pure string formatting for the insights panel (kept out of the View so it is
+/// unit-testable without SwiftUI/availability gymnastics).
+enum InsightsFormat {
+    /// A clamped, rounded percentage label, e.g. 0.6 -> "60%".
+    static func percent(_ ratio: Double) -> String {
+        let clamped = max(0, min(1, ratio))
+        return "\(Int((clamped * 100).rounded()))%"
+    }
+
+    /// A signed fixed-point label, e.g. 0.5 -> "+0.50", -0.2 (1 digit) -> "-0.2".
+    static func signed(_ value: Double, fractionDigits: Int = 2) -> String {
+        String(format: "%+.\(fractionDigits)f", value)
+    }
+}
