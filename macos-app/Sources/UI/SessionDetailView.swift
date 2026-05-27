@@ -239,7 +239,8 @@ struct SessionDetailView: View {
         transcriptionError = nil
         saveMessage = nil
 
-        await appModel.transcribeSession(session)
+        // Use `current` (DB-fresh) so Re-process picks up an edited recording type.
+        await appModel.transcribeSession(current)
 
         if appModel.state == .error {
             transcriptionError = appModel.lastError

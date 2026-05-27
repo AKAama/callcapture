@@ -272,6 +272,11 @@ final class SessionManager {
                 record.recordingType = recordingType
                 try record.update(db)
             }
+
+            // Keep the in-memory list in sync (preserves all other fields).
+            if let index = recentSessions.firstIndex(where: { $0.id == id }) {
+                recentSessions[index].recordingType = recordingType
+            }
         } catch {
             Self.logger.error("Failed to update recording type for \(id): \(error)")
         }
