@@ -257,6 +257,26 @@ final class SessionManager {
         }
     }
 
+    /// Persists a corrected recording type for a session.
+    ///
+    /// - Parameters:
+    ///   - id: Session identifier.
+    ///   - recordingType: New recording-type raw value (e.g. "lecture").
+    func updateRecordingType(id: String, recordingType: String) {
+        do {
+            try database.dbPool.write { db in
+                guard var record = try SessionRecord.fetchOne(db, key: id) else {
+                    Self.logger.warning("Session not found for recording type update: \(id)")
+                    return
+                }
+                record.recordingType = recordingType
+                try record.update(db)
+            }
+        } catch {
+            Self.logger.error("Failed to update recording type for \(id): \(error)")
+        }
+    }
+
     /// Updates the status (and optional error message) for a session.
     ///
     /// - Parameters:
