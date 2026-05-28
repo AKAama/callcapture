@@ -32,7 +32,12 @@ _PROVIDER_CONFIG: dict[str, dict[str, str]] = {
     "assemblyai": {
         "base_url": "https://api.assemblyai.com/v2",
         "env_key": "ASSEMBLYAI_API_KEY",
-        "model": "best",  # only used in the request payload, not as a model id
+        "model": "best",
+    },
+    "deepgram": {
+        "base_url": "https://api.deepgram.com/v1",
+        "env_key": "DEEPGRAM_API_KEY",
+        "model": "nova-3",
     },
 }
 
@@ -69,6 +74,9 @@ def transcribe_remote(
 
     if provider == "assemblyai":
         return _transcribe_assemblyai(audio_path, language, api_key, job_id)
+
+    if provider == "deepgram":
+        return _transcribe_deepgram(audio_path, language, api_key, job_id)
 
     from openai import OpenAI
 
@@ -226,24 +234,44 @@ _ASSEMBLYAI_ENGLISH_ONLY_FEATURES = (
     "entity_detection",
 )
 
+# AssemblyAI's `best` (Universal-2) speech model supports diarization + the
+# English-only analytics above but only a narrow language set. The `nano` model
+# covers ~99 languages with NO analytics (text-only). We switch automatically
+# so Ukrainian/Russian/etc. transcribe successfully — at the cost of analytics.
+_ASSEMBLYAI_BEST_LANGUAGES = {
+    "en", "es", "fr", "de", "it", "pt", "nl",
+    "ja", "zh", "ko", "hi",
+}
+
 
 def _assemblyai_transcript_payload(audio_url: str, language: str) -> dict[str, Any]:
     """Build the /transcript request body.
 
-    Always asks for `speaker_labels` (broadly multilingual). Adds the
-    English-only analytics ONLY when language is "auto" (let AssemblyAI detect)
-    or explicitly "en"; requesting them on Ukrainian/Russian/etc. is what
-    triggered the original HTTP 400.
+    Routing:
+    * `auto` or `en` → `best` model + speaker labels + English-only analytics.
+    * Any other supported-by-`best` language → `best` + speaker labels (no
+      English-only analytics — they 400 on non-English).
+    * Anything else → `nano` model (broad language support, text only).
+
+    Requesting English-only analytics on non-English audio, or requesting an
+    unsupported language on the `best` model, both return HTTP 400 from
+    `/transcript` before polling — the original failures.
     """
-    payload: dict[str, Any] = {
-        "audio_url": audio_url,
-        "speaker_labels": True,
-    }
-    is_english_or_auto = language in ("", "auto", "en")
-    if is_english_or_auto:
+    payload: dict[str, Any] = {"audio_url": audio_url}
+    if language in ("", "auto"):
+        payload["speech_model"] = "best"
+        payload["speaker_labels"] = True
         for feature in _ASSEMBLYAI_ENGLISH_ONLY_FEATURES:
             payload[feature] = True
-    if language and language not in ("auto",):
+    elif language in _ASSEMBLYAI_BEST_LANGUAGES:
+        payload["speech_model"] = "best"
+        payload["speaker_labels"] = True
+        payload["language_code"] = language
+        if language == "en":
+            for feature in _ASSEMBLYAI_ENGLISH_ONLY_FEATURES:
+                payload[feature] = True
+    else:
+        payload["speech_model"] = "nano"
         payload["language_code"] = language
     return payload
 
@@ -282,3 +310,175 @@ def _assemblyai_request(
         return resp.json()
     except ValueError as exc:
         raise RuntimeError(f"AssemblyAI {method} returned non-JSON: {exc}") from exc
+
+
+# ---- Deepgram --------------------------------------------------------------
+
+_DEEPGRAM_REQUEST_TIMEOUT = 600.0  # synchronous POST returns when done
+
+# Languages supported by Deepgram's Nova-3 with diarization + sentiment. The
+# model itself covers ~36 languages; this set tracks the ones our UI exposes
+# (see SpokenLanguage.swift). Anything not in here falls back to `auto`.
+_DEEPGRAM_NOVA3_LANGUAGES = {
+    "en", "es", "fr", "de", "it", "pt", "nl", "ru", "uk", "pl",
+    "cs", "sv", "tr", "ja", "ko", "zh", "ar", "hi",
+}
+
+
+def _transcribe_deepgram(
+    audio_path: str,
+    language: str,
+    api_key: str,
+    job_id: str,
+) -> list[TranscriptSegment]:
+    """Deepgram Nova-3 transcription (single sync POST).
+
+    Deepgram returns words with speaker indices and grouped paragraphs in one
+    response — no upload + poll roundtrip. Covers the languages AssemblyAI's
+    `best` model can't (notably Ukrainian/Russian/Polish), with native speaker
+    diarization and sentiment.
+    """
+    import httpx
+
+    base = _PROVIDER_CONFIG["deepgram"]["base_url"]
+    model = _PROVIDER_CONFIG["deepgram"]["model"]
+    params = _deepgram_params(language=language, model=model)
+
+    report_progress(job_id, 0.15, "uploading_audio")
+    with open(audio_path, "rb") as f:
+        audio = f.read()
+
+    report_progress(job_id, 0.35, "transcribing_remote")
+    resp = httpx.post(
+        f"{base}/listen",
+        params=params,
+        headers={
+            "Authorization": f"Token {api_key}",
+            "Content-Type": "audio/wav",
+        },
+        content=audio,
+        timeout=_DEEPGRAM_REQUEST_TIMEOUT,
+    )
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+            detail = body.get("err_msg") or body.get("error") or resp.text
+        except ValueError:
+            detail = resp.text
+        raise RuntimeError(
+            f"Deepgram /listen -> {resp.status_code}: {str(detail)[:300]}"
+        )
+
+    report_progress(job_id, 0.9, "parsing_response")
+    segments = _deepgram_segments_from(resp.json())
+    report_progress(job_id, 0.95, "transcription_complete")
+    return segments
+
+
+def _deepgram_params(*, language: str, model: str) -> dict[str, str]:
+    """Build the query-string params for POST /v1/listen.
+
+    `language=multi` is Deepgram's auto-detect/code-switching sentinel. Unknown
+    languages also fall back to `multi` so we never send an unsupported code.
+    """
+    params: dict[str, str] = {
+        "model": model,
+        "diarize": "true",
+        "punctuate": "true",
+        "smart_format": "true",
+        "sentiment": "true",
+    }
+    if language in ("", "auto"):
+        params["language"] = "multi"
+    elif language in _DEEPGRAM_NOVA3_LANGUAGES:
+        params["language"] = language
+    else:
+        params["language"] = "multi"
+    return params
+
+
+def _deepgram_segments_from(body: dict[str, Any]) -> list[TranscriptSegment]:
+    """Map a Deepgram /listen response to `TranscriptSegment` list.
+
+    Prefers `paragraphs.paragraphs` (already grouped by speaker turn). Falls
+    back to grouping consecutive same-speaker words. Last resort: the flat
+    transcript as a single segment.
+    """
+    try:
+        alt = body["results"]["channels"][0]["alternatives"][0]
+    except (KeyError, IndexError, TypeError):
+        return []
+
+    # Best path: pre-grouped paragraphs.
+    paragraphs = (alt.get("paragraphs") or {}).get("paragraphs") or []
+    if paragraphs:
+        segments: list[TranscriptSegment] = []
+        for para in paragraphs:
+            speaker_id = para.get("speaker")
+            speaker = f"Speaker {speaker_id}" if speaker_id is not None else None
+            sentences = para.get("sentences") or []
+            text = " ".join(str(s.get("text", "")).strip() for s in sentences).strip()
+            if not text:
+                continue
+            segments.append(
+                TranscriptSegment(
+                    start=float(para.get("start", 0)),
+                    end=float(para.get("end", 0)),
+                    text=text,
+                    speaker=speaker,
+                )
+            )
+        if segments:
+            return segments
+
+    # Mid path: regroup words by speaker.
+    words = alt.get("words") or []
+    if words:
+        segments = []
+        current: dict[str, Any] | None = None
+        for w in words:
+            speaker_id = w.get("speaker")
+            text_piece = str(w.get("punctuated_word") or w.get("word", "")).strip()
+            if current is None or current["speaker_id"] != speaker_id:
+                if current is not None and current["words"]:
+                    segments.append(
+                        TranscriptSegment(
+                            start=current["start"],
+                            end=current["end"],
+                            text=" ".join(current["words"]).strip(),
+                            speaker=(
+                                f"Speaker {current['speaker_id']}"
+                                if current["speaker_id"] is not None else None
+                            ),
+                        )
+                    )
+                current = {
+                    "speaker_id": speaker_id,
+                    "start": float(w.get("start", 0)),
+                    "end": float(w.get("end", 0)),
+                    "words": [text_piece] if text_piece else [],
+                }
+            else:
+                current["end"] = float(w.get("end", current["end"]))
+                if text_piece:
+                    current["words"].append(text_piece)
+        if current is not None and current["words"]:
+            segments.append(
+                TranscriptSegment(
+                    start=current["start"],
+                    end=current["end"],
+                    text=" ".join(current["words"]).strip(),
+                    speaker=(
+                        f"Speaker {current['speaker_id']}"
+                        if current["speaker_id"] is not None else None
+                    ),
+                )
+            )
+        if segments:
+            return segments
+
+    # Fallback: single segment from the flat transcript.
+    text = str(alt.get("transcript", "")).strip()
+    if not text:
+        return []
+    return [TranscriptSegment(start=0.0, end=0.0, text=text, speaker=None)]

@@ -57,18 +57,6 @@ def test_empty_body_returns_no_segments():
 # ---- transcript payload --------------------------------------------------
 
 
-def test_payload_for_ukrainian_omits_english_only_features():
-    """Regression: requesting sentiment/auto_chapters/entity_detection on
-    non-English audio returns HTTP 400 from AssemblyAI."""
-    p = _assemblyai_transcript_payload("u://x.wav", "uk")
-    assert p["audio_url"] == "u://x.wav"
-    assert p["speaker_labels"] is True
-    assert p["language_code"] == "uk"
-    assert "sentiment_analysis" not in p
-    assert "auto_chapters" not in p
-    assert "entity_detection" not in p
-
-
 def test_payload_for_english_includes_full_analytics():
     p = _assemblyai_transcript_payload("u://x.wav", "en")
     assert p["sentiment_analysis"] is True
@@ -84,3 +72,26 @@ def test_payload_for_auto_omits_language_code_and_keeps_analytics():
     assert "language_code" not in p
     assert p["sentiment_analysis"] is True
     assert p["speaker_labels"] is True
+    assert p["speech_model"] == "best"
+
+
+def test_payload_for_ukrainian_falls_back_to_nano():
+    """Ukrainian isn't supported by AssemblyAI's `best` model, so we MUST
+    switch to `nano` (no analytics, text only) — otherwise /transcript 400s
+    with 'language not supported'."""
+    p = _assemblyai_transcript_payload("u://x.wav", "uk")
+    assert p["speech_model"] == "nano"
+    assert p["language_code"] == "uk"
+    assert "speaker_labels" not in p  # nano has no diarization
+    assert "sentiment_analysis" not in p
+
+
+def test_payload_for_spanish_uses_best_with_speaker_labels_only():
+    """Spanish IS supported by `best`, so we keep diarization but drop the
+    English-only analytics (sentiment etc. would 400 on non-English)."""
+    p = _assemblyai_transcript_payload("u://x.wav", "es")
+    assert p["speech_model"] == "best"
+    assert p["language_code"] == "es"
+    assert p["speaker_labels"] is True
+    assert "sentiment_analysis" not in p
+    assert "auto_chapters" not in p
