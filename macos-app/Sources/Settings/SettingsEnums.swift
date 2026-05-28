@@ -44,6 +44,18 @@ enum RemoteProvider: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// Short label used in tight UI contexts (SecureField, badges) — the long
+    /// `displayName` overflows row width in macOS `.formStyle(.grouped)` and
+    /// can collapse the bound field to zero width, hiding it entirely.
+    var shortName: String {
+        switch self {
+        case .groq: "Groq"
+        case .openai: "OpenAI"
+        case .deepgram: "Deepgram"
+        case .assemblyai: "AssemblyAI"
+        }
+    }
+
     /// Whether this provider returns rich audio analytics beyond the raw
     /// transcript (speaker diarization, sentiment, topics, summarization, …).
     /// Used to surface a hint in Settings and to widen the post-processing

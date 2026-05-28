@@ -61,9 +61,14 @@ struct SettingsView: View {
 
             if settings.defaultEngine == .remote {
                 SecureField(
-                    "\(settings.remoteProvider.displayName) API Key",
+                    "\(settings.remoteProvider.shortName) API Key",
                     text: $settings.remoteApiKey
                 )
+                if settings.remoteProvider.hasAnalytics {
+                    Text("\(settings.remoteProvider.shortName) returns analytics (diarization, sentiment, etc.) the worker reads natively.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if settings.defaultEngine != .remote && settings.llmProvider == .local {
