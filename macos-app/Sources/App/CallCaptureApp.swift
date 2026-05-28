@@ -194,11 +194,24 @@ final class AppModel {
             llmBaseURL = settingsManager.localLLMBaseURL
             llmKey = "ollama" // placeholder; local servers ignore it
         }
-        let llmEnv = [
+        var llmEnv = [
             "LLM_BASE_URL": llmBaseURL,
             "LLM_MODEL": settingsManager.llmModel,
             "LLM_API_KEY": llmKey,
         ]
+        // Remote transcription providers read a provider-specific key from env.
+        // Plumb the configured `remoteApiKey` into the right slot when the user
+        // has actually picked the remote engine.
+        if settingsManager.defaultEngine == .remote && !settingsManager.remoteApiKey.isEmpty {
+            let key: String
+            switch settingsManager.remoteProvider {
+            case .groq: key = "GROQ_API_KEY"
+            case .openai: key = "OPENAI_API_KEY"
+            case .deepgram: key = "DEEPGRAM_API_KEY"
+            case .assemblyai: key = "ASSEMBLYAI_API_KEY"
+            }
+            llmEnv[key] = settingsManager.remoteApiKey
+        }
 
         // Diarize the remote audio and write the turns sidecar the worker reads,
         // before transcription. No-ops unless the recording type diarizes and

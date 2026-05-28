@@ -56,6 +56,7 @@ struct SettingsView: View {
         Section("API Keys") {
             if settings.llmProvider == .openrouter {
                 SecureField("OpenRouter API Key", text: $settings.openRouterApiKey)
+                OpenRouterTestRow(apiKey: settings.openRouterApiKey)
             }
 
             if settings.defaultEngine == .remote {
@@ -83,8 +84,7 @@ struct SettingsView: View {
                 }
             }
 
-            TextField("Model", text: $settings.llmModel)
-                .textFieldStyle(.roundedBorder)
+            LLMModelPickerRow(slug: $settings.llmModel)
 
             if settings.llmProvider == .local {
                 TextField("Local LLM Base URL", text: $settings.localLLMBaseURL)
@@ -300,6 +300,112 @@ private struct DiarizationModelsRow: View {
                 errorMessage = error.localizedDescription
             }
             isDownloading = false
+        }
+    }
+}
+
+/// "Test Connection" against the configured OpenRouter key. Calls `/auth/key`
+/// and renders the result inline so the user can sanity-check before recording.
+@available(macOS 14.2, *)
+private struct OpenRouterTestRow: View {
+    let apiKey: String
+
+    private enum Status: Equatable {
+        case idle
+        case testing
+        case ok(summary: String)
+        case failed(message: String)
+    }
+
+    @State private var status: Status = .idle
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button("Test Connection") {
+                    Task { await runCheck() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty || status == .testing)
+
+                if status == .testing {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+            }
+            switch status {
+            case .idle:
+                EmptyView()
+            case .testing:
+                Text("Calling openrouter.ai/auth/key…")
+                    .font(.caption).foregroundStyle(.secondary)
+            case .ok(let summary):
+                Label(summary, systemImage: "checkmark.circle.fill")
+                    .font(.caption).foregroundStyle(.green)
+            case .failed(let message):
+                Label(message, systemImage: "xmark.octagon.fill")
+                    .font(.caption).foregroundStyle(.red)
+            }
+        }
+        .onChange(of: apiKey) { _, _ in status = .idle }
+    }
+
+    private func runCheck() async {
+        status = .testing
+        do {
+            let info = try await OpenRouterClient().validate(apiKey: apiKey)
+            status = .ok(summary: info.summary)
+        } catch {
+            status = .failed(message: (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription)
+        }
+    }
+}
+
+/// Picker over the curated OpenRouter model catalog with a "Custom…" escape
+/// hatch. The bound `slug` is always what the worker receives via `LLM_MODEL`.
+@available(macOS 14.2, *)
+private struct LLMModelPickerRow: View {
+    @Binding var slug: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Model", selection: Binding(
+                get: { LLMModelCatalog.option(for: slug) },
+                set: { option in
+                    if !option.isCustom {
+                        slug = option.slug
+                    } else if LLMModelCatalog.curated.contains(where: { $0.slug == slug && !$0.isCustom }) {
+                        // Switching FROM a curated slug to Custom — clear so the
+                        // user can type a new one without the old slug lingering.
+                        slug = ""
+                    }
+                }
+            )) {
+                Section("Best for tone & nuance") {
+                    ForEach(LLMModelCatalog.toneAware) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                Section("Fast & cheap") {
+                    ForEach(LLMModelCatalog.fastAndCheap) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                Text(LLMModelCatalog.custom.displayName).tag(LLMModelCatalog.custom)
+            }
+
+            let selected = LLMModelCatalog.option(for: slug)
+            if selected.isCustom {
+                TextField("Slug (e.g. provider/model-id)", text: $slug)
+                    .textFieldStyle(.roundedBorder)
+                Text("Any OpenRouter model id. Browse openrouter.ai/models.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text(selected.blurb)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }

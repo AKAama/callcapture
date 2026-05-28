@@ -33,12 +33,25 @@ enum RemoteProvider: String, Codable, CaseIterable, Sendable {
     case groq
     case openai
     case deepgram
+    case assemblyai
 
     var displayName: String {
         switch self {
-        case .groq: "Groq"
-        case .openai: "OpenAI"
-        case .deepgram: "Deepgram"
+        case .groq: "Groq (fast Whisper)"
+        case .openai: "OpenAI Whisper"
+        case .deepgram: "Deepgram (diarization, sentiment, topics)"
+        case .assemblyai: "AssemblyAI (diarization, sentiment, summaries, topics)"
+        }
+    }
+
+    /// Whether this provider returns rich audio analytics beyond the raw
+    /// transcript (speaker diarization, sentiment, topics, summarization, …).
+    /// Used to surface a hint in Settings and to widen the post-processing
+    /// pipeline later if/when we ingest the provider-supplied analytics.
+    var hasAnalytics: Bool {
+        switch self {
+        case .groq, .openai: false
+        case .deepgram, .assemblyai: true
         }
     }
 }
