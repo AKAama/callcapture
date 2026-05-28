@@ -50,7 +50,6 @@ final class SettingsManager {
     var outputDirectory: String = defaultOutputDirectory { didSet { persist("output_directory", outputDirectory) } }
     var obsidianExportDirectory: String = "" { didSet { persist("obsidian_export_directory", obsidianExportDirectory) } }
     var obsidianFolderPattern: String = "_meetings/{YYYY-MM}/" { didSet { persist("obsidian_folder_pattern", obsidianFolderPattern) } }
-    var enableDiarization: Bool = false { didSet { persist("enable_diarization", String(enableDiarization)) } }
     var autoProcessOnStop: Bool = true { didSet { persist("auto_process_on_stop", String(autoProcessOnStop)) } }
     var keepSeparateMicTrack: Bool = false { didSet { persist("keep_separate_mic_track", String(keepSeparateMicTrack)) } }
     var diarizationModelsReady: Bool = false { didSet { persist("diarization_models_ready", String(diarizationModelsReady)) } }
@@ -121,7 +120,6 @@ final class SettingsManager {
         if let raw = rows["output_directory"], !raw.isEmpty { outputDirectory = raw }
         if let raw = rows["obsidian_export_directory"] { obsidianExportDirectory = raw }
         if let raw = rows["obsidian_folder_pattern"], !raw.isEmpty { obsidianFolderPattern = raw }
-        if let raw = rows["enable_diarization"] { enableDiarization = raw == "true" }
         if let raw = rows["auto_process_on_stop"] { autoProcessOnStop = raw == "true" }
         if let raw = rows["keep_separate_mic_track"] { keepSeparateMicTrack = raw == "true" }
         if let raw = rows["diarization_models_ready"] { diarizationModelsReady = raw == "true" }

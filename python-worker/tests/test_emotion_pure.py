@@ -33,7 +33,6 @@ def test_slice_signal_clamps_to_bounds():
     assert len(out) == int(sr * 0.5)  # only 0.5s of audio remains past 1.5s
 
 
-import os
 
 
 def test_emotion_model_dir_under_app_support():

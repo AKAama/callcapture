@@ -194,7 +194,7 @@ final class AppModel {
             llmBaseURL = settingsManager.localLLMBaseURL
             llmKey = "ollama" // placeholder; local servers ignore it
         }
-        pythonBridge.llmEnvironment = [
+        let llmEnv = [
             "LLM_BASE_URL": llmBaseURL,
             "LLM_MODEL": settingsManager.llmModel,
             "LLM_API_KEY": llmKey,
@@ -209,7 +209,7 @@ final class AppModel {
         )
 
         do {
-            let result = try await pythonBridge.runJob(request: request)
+            let result = try await pythonBridge.runJob(request: request, env: llmEnv)
 
             if result.status == "error" || result.status == "failed" {
                 let message = result.errorMessage

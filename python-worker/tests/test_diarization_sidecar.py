@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 from app.analyze.diarization import load_diarization_turns
 

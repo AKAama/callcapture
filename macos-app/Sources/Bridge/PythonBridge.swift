@@ -20,9 +20,6 @@ final class PythonBridge: @unchecked Sendable {
     /// Absolute path to the python-worker source directory, used in dev mode.
     var pythonWorkerDirectory: String
 
-    /// Extra environment passed to the worker process (e.g. OpenRouter creds).
-    var llmEnvironment: [String: String] = [:]
-
     private static let logger = Logger(
         subsystem: "com.callcapture.app",
         category: "PythonBridge"
@@ -62,10 +59,13 @@ final class PythonBridge: @unchecked Sendable {
 
     /// Runs a transcription/processing job via the Python worker.
     ///
-    /// - Parameter request: The job request to send.
+    /// - Parameters:
+    ///   - request: The job request to send.
+    ///   - env: Extra environment to pass to the worker process for this job
+    ///     (e.g. `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`); defaults to none.
     /// - Returns: The job result from the worker.
     /// - Throws: `BridgeError` on failure.
-    func runJob(request: JobRequest) async throws -> JobResult {
+    func runJob(request: JobRequest, env: [String: String] = [:]) async throws -> JobResult {
         var lastError: Error = BridgeError.maxRetriesExceeded(
             jobId: request.jobId,
             attempts: Self.maxRetries
@@ -73,7 +73,7 @@ final class PythonBridge: @unchecked Sendable {
 
         for attempt in 1...Self.maxRetries {
             do {
-                let result = try await executeWorker(request: request)
+                let result = try await executeWorker(request: request, env: env)
                 return result
             } catch is CancellationError {
                 // User/app cancelled — do not retry.
@@ -187,7 +187,7 @@ final class PythonBridge: @unchecked Sendable {
 
     // MARK: - Private
 
-    private func executeWorker(request: JobRequest) async throws -> JobResult {
+    private func executeWorker(request: JobRequest, env: [String: String]) async throws -> JobResult {
         let process = Process()
 
         if devMode {
@@ -216,11 +216,11 @@ final class PythonBridge: @unchecked Sendable {
             process.arguments = [request.command]
         }
 
-        var env = ProcessInfo.processInfo.environment
-        for (key, value) in llmEnvironment where !value.isEmpty {
-            env[key] = value
+        var processEnv = ProcessInfo.processInfo.environment
+        for (key, value) in env where !value.isEmpty {
+            processEnv[key] = value
         }
-        process.environment = env
+        process.environment = processEnv
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
