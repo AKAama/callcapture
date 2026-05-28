@@ -142,36 +142,24 @@ def _transcribe_assemblyai(
     # 1. Upload the audio file.
     report_progress(job_id, 0.15, "uploading_audio")
     with open(audio_path, "rb") as f:
-        upload = httpx.post(
-            f"{base}/upload",
-            headers=headers,
-            content=f.read(),
+        upload = _assemblyai_request(
+            "POST", f"{base}/upload",
+            headers=headers, content=f.read(),
             timeout=_ASSEMBLYAI_UPLOAD_TIMEOUT,
         )
-    upload.raise_for_status()
-    upload_url = upload.json().get("upload_url")
+    upload_url = upload.get("upload_url")
     if not upload_url:
         raise RuntimeError("AssemblyAI /upload did not return upload_url")
 
-    # 2. Submit the transcription job with analytics turned on.
+    # 2. Submit the transcription job.
     report_progress(job_id, 0.25, "submitting_transcript")
-    payload: dict[str, Any] = {
-        "audio_url": upload_url,
-        "speaker_labels": True,
-        "sentiment_analysis": True,
-        "entity_detection": True,
-        "auto_chapters": True,
-    }
-    if language and language != "auto":
-        payload["language_code"] = language
-    submit = httpx.post(
-        f"{base}/transcript",
-        headers=headers,
-        json=payload,
+    payload = _assemblyai_transcript_payload(upload_url, language)
+    submit = _assemblyai_request(
+        "POST", f"{base}/transcript",
+        headers=headers, json=payload,
         timeout=_ASSEMBLYAI_REQUEST_TIMEOUT,
     )
-    submit.raise_for_status()
-    transcript_id = submit.json().get("id")
+    transcript_id = submit.get("id")
     if not transcript_id:
         raise RuntimeError("AssemblyAI /transcript did not return id")
 
@@ -179,9 +167,11 @@ def _transcribe_assemblyai(
     poll_url = f"{base}/transcript/{transcript_id}"
     report_progress(job_id, 0.35, "transcribing_remote")
     while True:
-        resp = httpx.get(poll_url, headers=headers, timeout=_ASSEMBLYAI_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        body = resp.json()
+        body = _assemblyai_request(
+            "GET", poll_url,
+            headers=headers,
+            timeout=_ASSEMBLYAI_REQUEST_TIMEOUT,
+        )
         status = body.get("status")
         if status == "completed":
             break
@@ -226,3 +216,69 @@ def _assemblyai_segments_from(body: dict[str, Any]) -> list[TranscriptSegment]:
         return []
     duration = float(body.get("audio_duration", 0))
     return [TranscriptSegment(start=0.0, end=duration, text=text, speaker=None)]
+
+
+# AssemblyAI features that are documented English-only. Requesting them on
+# non-English audio returns HTTP 400 from /transcript before polling starts.
+_ASSEMBLYAI_ENGLISH_ONLY_FEATURES = (
+    "sentiment_analysis",
+    "auto_chapters",
+    "entity_detection",
+)
+
+
+def _assemblyai_transcript_payload(audio_url: str, language: str) -> dict[str, Any]:
+    """Build the /transcript request body.
+
+    Always asks for `speaker_labels` (broadly multilingual). Adds the
+    English-only analytics ONLY when language is "auto" (let AssemblyAI detect)
+    or explicitly "en"; requesting them on Ukrainian/Russian/etc. is what
+    triggered the original HTTP 400.
+    """
+    payload: dict[str, Any] = {
+        "audio_url": audio_url,
+        "speaker_labels": True,
+    }
+    is_english_or_auto = language in ("", "auto", "en")
+    if is_english_or_auto:
+        for feature in _ASSEMBLYAI_ENGLISH_ONLY_FEATURES:
+            payload[feature] = True
+    if language and language not in ("auto",):
+        payload["language_code"] = language
+    return payload
+
+
+def _assemblyai_request(
+    method: str, url: str, *, headers: dict[str, str], timeout: float,
+    content: bytes | None = None, json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Thin httpx wrapper that surfaces the AssemblyAI error body on non-2xx.
+
+    The default `httpx.HTTPStatusError` only carries the status code, so a 400
+    bubbles to Swift as "HTTPStatusError" with no clue why. We pull the
+    response body — AssemblyAI returns `{"error": "<reason>"}` — and re-raise
+    a clearer `RuntimeError`.
+    """
+    import httpx
+
+    kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout}
+    if content is not None:
+        kwargs["content"] = content
+    if json is not None:
+        kwargs["json"] = json
+
+    resp = httpx.request(method, url, **kwargs)
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+            detail = body.get("error") or body.get("message") or resp.text
+        except ValueError:
+            detail = resp.text
+        raise RuntimeError(
+            f"AssemblyAI {method} {url.rsplit('/', 1)[-1]} -> "
+            f"{resp.status_code}: {str(detail)[:300]}"
+        )
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise RuntimeError(f"AssemblyAI {method} returned non-JSON: {exc}") from exc
