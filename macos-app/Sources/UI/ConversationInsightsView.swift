@@ -19,6 +19,9 @@ struct ConversationInsightsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if sentiment.arc.count > 1 {
+                    ArcSparkline(arc: sentiment.arc)
+                }
             }
 
             ForEach(analysis.speakers, id: \.label) { speaker in
@@ -88,5 +91,49 @@ struct ConversationInsightsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Thin sparkline of acoustic-valence over time. The dashed midline is neutral
+/// (score 0); the line traces valence in [-1, 1] across the recording duration.
+@available(macOS 14.2, *)
+private struct ArcSparkline: View {
+    let arc: [ArcPoint]
+
+    var body: some View {
+        Canvas { context, size in
+            guard arc.count > 1 else { return }
+            let tMin = arc.first!.t
+            let tMax = arc.last!.t
+            let tRange = max(tMax - tMin, 0.001)
+
+            func point(_ p: ArcPoint) -> CGPoint {
+                let x = (p.t - tMin) / tRange * size.width
+                let clamped = max(-1, min(1, p.score))
+                // Map score -1..1 to y = bottom..top (flip the SwiftUI axis).
+                let y = (1 - (clamped + 1) / 2) * size.height
+                return CGPoint(x: x, y: y)
+            }
+
+            // Neutral baseline.
+            var baseline = Path()
+            baseline.move(to: CGPoint(x: 0, y: size.height / 2))
+            baseline.addLine(to: CGPoint(x: size.width, y: size.height / 2))
+            context.stroke(
+                baseline,
+                with: .color(.secondary.opacity(0.3)),
+                style: StrokeStyle(lineWidth: 0.5, dash: [2, 2])
+            )
+
+            // Arc line.
+            var line = Path()
+            line.move(to: point(arc[0]))
+            for p in arc.dropFirst() {
+                line.addLine(to: point(p))
+            }
+            context.stroke(line, with: .color(.accentColor), lineWidth: 1.5)
+        }
+        .frame(height: 28)
+        .accessibilityLabel("Emotional arc over time")
     }
 }
