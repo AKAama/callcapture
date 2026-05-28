@@ -27,7 +27,6 @@ class TestJobRequest:
         assert req.command == "transcribe"
         assert req.engine == "local_whisper"
         assert req.language == "auto"
-        assert req.speaker_diarization is False
         assert req.whisper_model == "base"
 
     def test_valid_full_request(self) -> None:
@@ -37,14 +36,12 @@ class TestJobRequest:
             audio_path="/tmp/test.wav",
             engine="remote",
             language="en",
-            speaker_diarization=True,
             markdown_profile="obsidian",
             whisper_model="large",
             llm_engine="claude",
             remote_provider="openai",
         )
         assert req.engine == "remote"
-        assert req.speaker_diarization is True
         assert req.markdown_profile == "obsidian"
 
     def test_invalid_command(self) -> None:

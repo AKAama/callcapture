@@ -8,7 +8,6 @@ struct JobRequest: Codable, Sendable {
     let audioPath: String
     let engine: String
     let language: String
-    let speakerDiarization: Bool
     let markdownProfile: String
     let whisperModel: String
     let llmEngine: String
@@ -21,7 +20,6 @@ struct JobRequest: Codable, Sendable {
         case audioPath = "audio_path"
         case engine
         case language
-        case speakerDiarization = "speaker_diarization"
         case markdownProfile = "markdown_profile"
         case whisperModel = "whisper_model"
         case llmEngine = "llm_engine"
@@ -43,7 +41,6 @@ struct JobRequest: Codable, Sendable {
             audioPath: audioPath,
             engine: engine,
             language: "auto",
-            speakerDiarization: false,
             markdownProfile: "meeting_notes",
             whisperModel: whisperModel,
             llmEngine: llmEngine,
@@ -60,7 +57,6 @@ struct JobRequest: Codable, Sendable {
             audioPath: "",
             engine: "local_whisper",
             language: "auto",
-            speakerDiarization: false,
             markdownProfile: "meeting_notes",
             whisperModel: "base",
             llmEngine: "claude",
@@ -84,7 +80,6 @@ struct JobRequest: Codable, Sendable {
             audioPath: session.audioPath,
             engine: settings.defaultEngine.rawValue,
             language: "auto",
-            speakerDiarization: settings.enableDiarization,
             markdownProfile: settings.markdownProfile.rawValue,
             whisperModel: settings.whisperModel.rawValue,
             llmEngine: settings.llmEngine.rawValue,

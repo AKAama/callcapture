@@ -17,7 +17,6 @@ class JobRequest(BaseModel, frozen=True):
     audio_path: str
     engine: Literal["local_whisper", "remote"] = "local_whisper"
     language: str = "auto"
-    speaker_diarization: bool = False
     markdown_profile: str = "meeting_notes"
     whisper_model: str = "base"
     llm_engine: str = "claude"
