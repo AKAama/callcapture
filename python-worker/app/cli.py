@@ -210,6 +210,7 @@ def _run_pipeline(request: JobRequest) -> JobResult:
 
 
 @click.group()
+@click.version_option(version="0.1.0", prog_name="call-capture-worker")
 def cli() -> None:
     """CallCapture Python worker CLI."""
 

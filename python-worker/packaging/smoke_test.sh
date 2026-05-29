@@ -6,9 +6,12 @@
 # Usage: packaging/smoke_test.sh [path-to-binary]
 #
 # Contract notes (verified against app/cli.py):
-#   * There is NO `--version` flag on the CLI group; `--help` is the liveness
-#     check that proves the frozen binary imported `app` and registered its
-#     commands (transcribe/postprocess/export/prepare_emotion).
+#   * `--version` exits 0 and prints a version string. The Swift PythonBridge
+#     healthCheck runs the worker with `--version`; this assertion locks that
+#     contract so it can never silently drift again.
+#   * `--help` is the liveness check that proves the frozen binary imported
+#     `app` and registered its commands (transcribe/postprocess/export/
+#     prepare_emotion).
 #   * The ping heartbeat format is {"action": "ping"} (see _check_ping). The
 #     worker replies {"pong": true} on STDERR and exits 0. {"ping": true} is
 #     NOT a ping — it is parsed as a JobRequest and yields a structured error.
@@ -21,6 +24,21 @@ if [[ ! -x "$BIN" ]]; then
     echo "error: worker binary not found/executable at $BIN" >&2
     exit 1
 fi
+
+echo "===> --version (health-check contract used by Swift PythonBridge)"
+set +e
+version_out="$("$BIN" --version)"
+rc=$?
+set -e
+if [[ $rc -ne 0 ]]; then
+    echo "error: --version exited non-zero (rc=$rc)" >&2
+    exit 1
+fi
+if [[ -z "$version_out" ]]; then
+    echo "error: --version printed nothing" >&2
+    exit 1
+fi
+echo "version: $version_out"
 
 echo "===> --help (liveness: binary loaded, commands registered)"
 help_out="$("$BIN" --help)"
