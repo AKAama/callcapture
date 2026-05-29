@@ -64,10 +64,13 @@ secrets** on `bodharma/callcapture`.
 | `AC_API_KEY_BASE64` | Base64 of the App Store Connect key: `base64 -i AuthKey_XXXX.p8 \| pbcopy` |
 | `AC_API_KEY_ID` | The App Store Connect API **Key ID** |
 | `AC_API_ISSUER_ID` | The App Store Connect API **Issuer ID** |
-| `APPLE_TEAM_ID` | Your Apple Developer **Team ID** (the `R72GTBB9MG`-style suffix in the identity) |
 | `HOMEBREW_TAP_TOKEN` | The fine-grained PAT with `contents:write` on `bodharma/homebrew-callcapture` |
 
-> When all 8 secrets are present the workflow signs + notarizes and bumps the
+> The Team ID is already embedded in `MACOS_SIGN_IDENTITY` (the `R72GTBB9MG`-style
+> suffix) and notarization authenticates via the App Store Connect API key, so no
+> separate `APPLE_TEAM_ID` secret is required.
+
+> When all 7 secrets are present the workflow signs + notarizes and bumps the
 > cask. If `MACOS_CERT_P12_BASE64` is missing, it emits an unsigned zip and
 > skips notarization/cask bump.
 

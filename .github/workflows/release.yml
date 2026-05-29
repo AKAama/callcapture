@@ -134,8 +134,13 @@ jobs:
           sed -i '' -E "s/  sha256 \".*\"/  sha256 \"${SHA}\"/" Casks/callcapture.rb
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "callcapture ${VERSION}"
-          git push
+          # Idempotent: skip cleanly if a re-run produces no change.
+          if git diff --quiet; then
+            echo "cask already up to date"
+          else
+            git commit -am "callcapture ${VERSION}"
+            git push
+          fi
 
       - name: Cleanup keychain
         if: always() && steps.secrets.outputs.signing == 'true'
