@@ -28,6 +28,16 @@ models/
 .idea/
 .vscode/
 
+# Agent / local session logs
+.claude/
+
+# Local data (never commit recordings or the session DB)
+*.wav
+*.sqlite
+*.db
+*.db-wal
+*.db-shm
+
 # Env
 .env
 .env.local
