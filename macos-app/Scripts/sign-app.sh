@@ -38,12 +38,41 @@ if [[ -f "$APP_BUNDLE/Contents/entitlements.plist" ]]; then
     rm "$APP_BUNDLE/Contents/entitlements.plist"
 fi
 
+# Identity: ad-hoc by default; pass a Developer ID for distribution, e.g.
+#   SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" Scripts/sign-app.sh <app>
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+
+# A secure (RFC 3161) timestamp requires a real signing identity; Apple's
+# timestamp server rejects ad-hoc signatures. So only request --timestamp when
+# signing with a real Developer ID. Ad-hoc keeps the (untrusted) local
+# behaviour it had before. This keeps BOTH paths correct: ad-hoc signs locally,
+# Developer ID gets the trusted timestamp notarization requires.
+TIMESTAMP_FLAG=(--timestamp=none)
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    TIMESTAMP_FLAG=(--timestamp)
+fi
+
+# Sign every nested Mach-O (the worker binary + its bundled .so/.dylib) BEFORE
+# the outer bundle. --deep is unreliable; iterate explicitly.
+WORKER_DIR="$APP_BUNDLE/Contents/Resources/worker"
+if [[ -d "$WORKER_DIR" ]]; then
+    echo "===> signing nested worker Mach-O"
+    find "$WORKER_DIR" \( -name "*.so" -o -name "*.dylib" \) -print0 \
+        | while IFS= read -r -d '' lib; do
+            codesign --force --sign "$SIGN_IDENTITY" "${TIMESTAMP_FLAG[@]}" \
+                --options runtime "$lib"
+        done
+    codesign --force --sign "$SIGN_IDENTITY" "${TIMESTAMP_FLAG[@]}" \
+        --options runtime "$WORKER_DIR/call-capture-worker"
+fi
+
 codesign \
     --force \
-    --sign - \
+    --sign "$SIGN_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
     --identifier com.callcapture.app \
     --options runtime \
+    "${TIMESTAMP_FLAG[@]}" \
     --generate-entitlement-der \
     "$APP_BUNDLE"
 
