@@ -38,6 +38,10 @@ models/
 *.db-wal
 *.db-shm
 
+# Built distribution artifacts
+CallCapture-*.zip
+*.dmg
+
 # Env
 .env
 .env.local

@@ -57,6 +57,18 @@ The app spawns the worker as a subprocess, sends a `JobRequest` on stdin, and re
 - Python **3.11+** (for the worker)
 - API keys only if you opt into cloud engines (AssemblyAI / Deepgram for transcription, OpenRouter for LLM notes) — stored in the macOS Keychain, never in the repo.
 
+### Install (Homebrew)
+
+```bash
+brew tap bodharma/callcapture
+brew install --cask callcapture
+```
+
+> The packaged app uses **cloud transcription** (AssemblyAI / Deepgram) plus full
+> on-device analysis (diarization, sentiment, emotion, insights). **On-device
+> Whisper** is available in source builds only for now — see
+> [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
 ## Quick start (from source)
 
 ```bash

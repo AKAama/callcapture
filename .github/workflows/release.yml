@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for a manual dry-run (no upload)"
+        required: false
+        default: "0.0.0-dryrun"
+
+permissions:
+  contents: write
+
+jobs:
+  build-zip:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build worker (PyInstaller)
+        working-directory: python-worker
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[packaging]"
+          pip install pydantic click numpy openai anthropic httpx onnxruntime audonnx audeer audiofile
+          pyinstaller --clean --noconfirm packaging/call-capture-worker.spec
+          chmod +x packaging/smoke_test.sh
+          ./packaging/smoke_test.sh
+
+      - name: Build Swift (release)
+        working-directory: macos-app
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app || true
+          swift build -c release --product CallCapture
+
+      - name: Assemble .app
+        working-directory: macos-app
+        run: ./Scripts/assemble-app.sh release ../python-worker/dist/call-capture-worker
+
+      - name: Check for signing secrets
+        id: secrets
+        run: |
+          if [ -n "${{ secrets.MACOS_CERT_P12_BASE64 }}" ]; then
+            echo "signing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signing secrets absent — producing an UNSIGNED zip (not notarized)."
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.secrets.outputs.signing == 'true'
+        env:
+          CERT_B64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PWD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          KP="$(uuidgen)"
+          security create-keychain -p "$KP" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KP" "$KEYCHAIN"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PWD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KP" "$KEYCHAIN"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Sign (Developer ID)
+        if: steps.secrets.outputs.signing == 'true'
+        working-directory: macos-app
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: ./Scripts/sign-app.sh .build/CallCapture.app
+
+      - name: Sign (ad-hoc fallback)
+        if: steps.secrets.outputs.signing == 'false'
+        working-directory: macos-app
+        run: ./Scripts/sign-app.sh .build/CallCapture.app
+
+      - name: Notarize + staple + zip
+        if: steps.secrets.outputs.signing == 'true'
+        working-directory: macos-app
+        env:
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          echo "${{ secrets.AC_API_KEY_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/ac_key.p8"
+          AC_API_KEY_PATH="$RUNNER_TEMP/ac_key.p8" \
+            ./Scripts/notarize.sh .build/CallCapture.app "${{ steps.ver.outputs.version }}" "CallCapture-${{ steps.ver.outputs.version }}.zip"
+
+      - name: Zip (unsigned fallback)
+        if: steps.secrets.outputs.signing == 'false'
+        working-directory: macos-app
+        run: ./Scripts/make-zip.sh .build/CallCapture.app "${{ steps.ver.outputs.version }}" "CallCapture-${{ steps.ver.outputs.version }}.zip"
+
+      - name: Upload zip to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" "macos-app/CallCapture-${{ steps.ver.outputs.version }}.zip" --clobber
+
+      - name: Upload zip as workflow artifact (dry-run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CallCapture-zip
+          path: macos-app/CallCapture-*.zip
+
+      - name: Bump Homebrew cask
+        if: github.event_name == 'release' && steps.secrets.outputs.signing == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          ZIP="macos-app/CallCapture-${VERSION}.zip"
+          SHA="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/bodharma/homebrew-callcapture.git" tap
+          cd tap
+          sed -i '' -E "s/  version \".*\"/  version \"${VERSION}\"/" Casks/callcapture.rb
+          sed -i '' -E "s/  sha256 \".*\"/  sha256 \"${SHA}\"/" Casks/callcapture.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Idempotent: skip cleanly if a re-run produces no change.
+          if git diff --quiet; then
+            echo "cask already up to date"
+          else
+            git commit -am "callcapture ${VERSION}"
+            git push
+          fi
+
+      - name: Cleanup keychain
+        if: always() && steps.secrets.outputs.signing == 'true'
+        run: security delete-keychain "$KEYCHAIN" || true

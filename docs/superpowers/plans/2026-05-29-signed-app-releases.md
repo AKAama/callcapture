@@ -936,3 +936,19 @@ git push origin main
   maintainer adds the Apple secrets; until then CI produces an unsigned DMG via
   the secret gate.
 ```
+
+---
+
+# REVISION 2026-05-29: DMG → Homebrew cask + notarized zip
+
+Distribution pivoted from DMG to a **Homebrew cask in an own tap** with a
+**notarized zip** artifact (see the updated spec for rationale). Tasks 1–8 stand.
+**Tasks 9–12 above are SUPERSEDED** by the following. Full script/workflow text
+is carried in the implementer dispatches; summarized here for the record:
+
+- **Task 9′ — `Scripts/make-zip.sh`** (replaces make-dmg): `ditto -c -k --keepParent CallCapture.app CallCapture-<ver>.zip`. Verify locally → "ZIP CREATED".
+- **Task 10′ — `Scripts/notarize.sh`** (zip flow): takes `<app> <version>`; `ditto` → `notarytool submit submit.zip --wait` → `stapler staple` the **.app** → re-zip the stapled app. Fast-fails on missing `AC_API_*` env.
+- **Task 11′ — `.github/workflows/release.yml`**: PyInstaller worker → swift release → assemble → secret-gated Developer-ID sign → notarize+staple+zip (signed) / plain zip (unsigned fallback) → `gh release upload <zip>` → **bump cask** in `bodharma/homebrew-callcapture` using `HOMEBREW_TAP_TOKEN` (signed path only). `workflow_dispatch` dry-run emits an unsigned zip artifact.
+- **Task 12′ — tap repo + cask + docs**: create public `bodharma/homebrew-callcapture` with `Casks/callcapture.rb` (version/sha placeholders the CI bump fills; `url` → release zip; `app "CallCapture.app"`; `depends_on macos: ">= :sonoma"`). Add `docs/RELEASING.md` (8 secrets incl. `HOMEBREW_TAP_TOKEN`, how to obtain cert/key/PAT, release flow, verify cmds) and a README **Install (Homebrew)** section (`brew tap bodharma/callcapture && brew install --cask callcapture`).
+
+Exit criteria: tagged release → notarized stapled zip on the release + cask bumped; `brew install --cask bodharma/callcapture/callcapture` installs an app that opens via double-click (`spctl -a -vvv -t install CallCapture.app` accepted).
