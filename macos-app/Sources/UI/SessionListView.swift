@@ -27,7 +27,12 @@ struct SessionListView: View {
         } detail: {
             if let id = selectedSessionID,
                let session = appModel.sessionManager.recentSessions.first(where: { $0.id == id }) {
+                // Tie the detail view's identity to the session id so switching
+                // sessions rebuilds it fresh. Without this, SwiftUI reuses the
+                // same instance and its @State (liveSession, analysis, title) —
+                // populated only in onAppear — stays stale on the prior session.
                 SessionDetailView(session: session)
+                    .id(session.id)
             } else {
                 ContentUnavailableView(
                     "No Session Selected",
