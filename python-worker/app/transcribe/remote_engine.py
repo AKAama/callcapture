@@ -32,7 +32,8 @@ _PROVIDER_CONFIG: dict[str, dict[str, str]] = {
     "assemblyai": {
         "base_url": "https://api.assemblyai.com/v2",
         "env_key": "ASSEMBLYAI_API_KEY",
-        "model": "best",
+        # Model selection lives in `_assemblyai_transcript_payload` via the
+        # `speech_models` list; this provider never reads a single "model" key.
     },
     "deepgram": {
         "base_url": "https://api.deepgram.com/v1",
@@ -226,52 +227,41 @@ def _assemblyai_segments_from(body: dict[str, Any]) -> list[TranscriptSegment]:
     return [TranscriptSegment(start=0.0, end=duration, text=text, speaker=None)]
 
 
-# AssemblyAI features that are documented English-only. Requesting them on
-# non-English audio returns HTTP 400 from /transcript before polling starts.
-_ASSEMBLYAI_ENGLISH_ONLY_FEATURES = (
-    "sentiment_analysis",
-    "auto_chapters",
-    "entity_detection",
-)
-
-# AssemblyAI's `best` (Universal-2) speech model supports diarization + the
-# English-only analytics above but only a narrow language set. The `nano` model
-# covers ~99 languages with NO analytics (text-only). We switch automatically
-# so Ukrainian/Russian/etc. transcribe successfully — at the cost of analytics.
-_ASSEMBLYAI_BEST_LANGUAGES = {
-    "en", "es", "fr", "de", "it", "pt", "nl",
-    "ja", "zh", "ko", "hi",
-}
+# AssemblyAI speech-model selection.
+#
+# The singular `speech_model` param and its `best` / `nano` aliases are
+# deprecated — sending them returns HTTP 400 "speech model is deprecated".
+# The current API uses the `speech_models` priority list: AssemblyAI routes to
+# the first model that supports the (declared or detected) language.
+#   * universal-3-pro — highest accuracy, 6 languages (en, es, pt, fr, de, it)
+#   * universal-2     — ~99 languages
+# Both support speaker diarization, so this list gives Pro accuracy where
+# available and broad-language coverage (Ukrainian/Russian/etc.) everywhere
+# else, all WITH speaker labels.
+_ASSEMBLYAI_SPEECH_MODELS = ["universal-3-pro", "universal-2"]
 
 
 def _assemblyai_transcript_payload(audio_url: str, language: str) -> dict[str, Any]:
     """Build the /transcript request body.
 
-    Routing:
-    * `auto` or `en` → `best` model + speaker labels + English-only analytics.
-    * Any other supported-by-`best` language → `best` + speaker labels (no
-      English-only analytics — they 400 on non-English).
-    * Anything else → `nano` model (broad language support, text only).
+    Always requests the `speech_models` priority list (the deprecated singular
+    `speech_model` 400s) and speaker diarization. The English-only analytics
+    (sentiment / chapters / entities) are NOT requested — `_assemblyai_segments_from`
+    never reads them, and they 400 on non-English audio. The worker derives
+    sentiment/insights from its own LLM post-processing instead.
 
-    Requesting English-only analytics on non-English audio, or requesting an
-    unsupported language on the `best` model, both return HTTP 400 from
-    `/transcript` before polling — the original failures.
+    Language handling:
+    * `""` / `auto` → `language_detection: true` (AssemblyAI detects).
+    * explicit code → `language_code` (AssemblyAI routes to a model supporting it).
     """
-    payload: dict[str, Any] = {"audio_url": audio_url}
+    payload: dict[str, Any] = {
+        "audio_url": audio_url,
+        "speech_models": _ASSEMBLYAI_SPEECH_MODELS,
+        "speaker_labels": True,
+    }
     if language in ("", "auto"):
-        payload["speech_model"] = "best"
-        payload["speaker_labels"] = True
-        for feature in _ASSEMBLYAI_ENGLISH_ONLY_FEATURES:
-            payload[feature] = True
-    elif language in _ASSEMBLYAI_BEST_LANGUAGES:
-        payload["speech_model"] = "best"
-        payload["speaker_labels"] = True
-        payload["language_code"] = language
-        if language == "en":
-            for feature in _ASSEMBLYAI_ENGLISH_ONLY_FEATURES:
-                payload[feature] = True
+        payload["language_detection"] = True
     else:
-        payload["speech_model"] = "nano"
         payload["language_code"] = language
     return payload
 

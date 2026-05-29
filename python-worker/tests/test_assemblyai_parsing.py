@@ -55,43 +55,52 @@ def test_empty_body_returns_no_segments():
 
 
 # ---- transcript payload --------------------------------------------------
+#
+# AssemblyAI deprecated the singular `speech_model` param (and the `best` /
+# `nano` aliases) — sending them returns HTTP 400 "speech model is deprecated".
+# The current API uses the `speech_models` priority list. We send
+# ["universal-3-pro", "universal-2"]: Pro handles its 6 high-accuracy languages,
+# Universal-2 (~99 languages) handles everything else, both with diarization.
+# The English-only analytics (sentiment / chapters / entities) are never read by
+# `_assemblyai_segments_from`, so we no longer request them at all.
+
+_EXPECTED_SPEECH_MODELS = ["universal-3-pro", "universal-2"]
+_DEAD_ANALYTICS = ("sentiment_analysis", "auto_chapters", "entity_detection")
 
 
-def test_payload_for_english_includes_full_analytics():
-    p = _assemblyai_transcript_payload("u://x.wav", "en")
-    assert p["sentiment_analysis"] is True
-    assert p["auto_chapters"] is True
-    assert p["entity_detection"] is True
-    assert p["language_code"] == "en"
+def test_payload_never_sends_deprecated_speech_model_key():
+    for lang in ("en", "auto", "", "uk", "es"):
+        p = _assemblyai_transcript_payload("u://x.wav", lang)
+        assert "speech_model" not in p, f"deprecated key leaked for {lang!r}"
+        assert p["speech_models"] == _EXPECTED_SPEECH_MODELS
 
 
-def test_payload_for_auto_omits_language_code_and_keeps_analytics():
-    """'auto' lets AssemblyAI detect; we keep analytics on and assume English
-    until the user explicitly picks a different language."""
-    p = _assemblyai_transcript_payload("u://x.wav", "auto")
-    assert "language_code" not in p
-    assert p["sentiment_analysis"] is True
-    assert p["speaker_labels"] is True
-    assert p["speech_model"] == "best"
+def test_payload_always_requests_diarization():
+    for lang in ("en", "auto", "uk", "es"):
+        p = _assemblyai_transcript_payload("u://x.wav", lang)
+        assert p["speaker_labels"] is True, f"no diarization for {lang!r}"
 
 
-def test_payload_for_ukrainian_falls_back_to_nano():
-    """Ukrainian isn't supported by AssemblyAI's `best` model, so we MUST
-    switch to `nano` (no analytics, text only) — otherwise /transcript 400s
-    with 'language not supported'."""
+def test_payload_drops_unused_english_only_analytics():
+    for lang in ("en", "auto", "uk", "es"):
+        p = _assemblyai_transcript_payload("u://x.wav", lang)
+        for feature in _DEAD_ANALYTICS:
+            assert feature not in p, f"{feature} requested but never parsed"
+
+
+def test_payload_for_explicit_language_sets_language_code():
     p = _assemblyai_transcript_payload("u://x.wav", "uk")
-    assert p["speech_model"] == "nano"
     assert p["language_code"] == "uk"
-    assert "speaker_labels" not in p  # nano has no diarization
-    assert "sentiment_analysis" not in p
+    assert "language_detection" not in p
 
 
-def test_payload_for_spanish_uses_best_with_speaker_labels_only():
-    """Spanish IS supported by `best`, so we keep diarization but drop the
-    English-only analytics (sentiment etc. would 400 on non-English)."""
-    p = _assemblyai_transcript_payload("u://x.wav", "es")
-    assert p["speech_model"] == "best"
-    assert p["language_code"] == "es"
-    assert p["speaker_labels"] is True
-    assert "sentiment_analysis" not in p
-    assert "auto_chapters" not in p
+def test_payload_for_auto_uses_language_detection_not_code():
+    for lang in ("auto", ""):
+        p = _assemblyai_transcript_payload("u://x.wav", lang)
+        assert "language_code" not in p
+        assert p["language_detection"] is True
+
+
+def test_payload_carries_audio_url():
+    p = _assemblyai_transcript_payload("u://x.wav", "en")
+    assert p["audio_url"] == "u://x.wav"
