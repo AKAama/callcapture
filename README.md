@@ -1,5 +1,10 @@
 # CallCapture
 
+[![CI](https://github.com/bodharma/callcapture/actions/workflows/ci.yml/badge.svg)](https://github.com/bodharma/callcapture/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Platform: macOS 14.2+](https://img.shields.io/badge/platform-macOS%2014.2%2B-lightgrey)](https://www.apple.com/macos/)
+[![Release](https://img.shields.io/github/v/release/bodharma/callcapture?include_prereleases&sort=semver)](https://github.com/bodharma/callcapture/releases)
+
 **Private, local-first call & meeting recording for macOS.** Capture system audio from any call (Google Meet, Zoom, Teams, or anything that plays through your speakers), transcribe it, separate who said what, and turn it into clean Markdown notes — without a bot joining your meeting and without your audio leaving your machine unless you choose a cloud transcription engine.
 
 > A local alternative to Fathom/Otter-style meeting recorders. No meeting bot, no mandatory cloud, no "who invited the notetaker?" — it captures the audio already playing on your Mac.

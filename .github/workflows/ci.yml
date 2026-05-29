@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-worker:
+    name: Python worker (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        # Heavy native deps (pywhispercpp, audonnx, onnxruntime) are imported
+        # lazily with graceful fallbacks, so the suite only needs these.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov pydantic click numpy openai anthropic
+      - name: Run tests
+        run: pytest
+
+  macos-app:
+    name: macOS app (swift build & test)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: macos-app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
