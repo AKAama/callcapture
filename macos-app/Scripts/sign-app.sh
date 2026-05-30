@@ -52,18 +52,21 @@ if [[ "$SIGN_IDENTITY" != "-" ]]; then
     TIMESTAMP_FLAG=(--timestamp)
 fi
 
-# Sign every nested Mach-O (the worker binary + its bundled .so/.dylib) BEFORE
-# the outer bundle. --deep is unreliable; iterate explicitly.
+# Sign every nested Mach-O BEFORE the outer bundle. --deep is unreliable; iterate
+# explicitly. Detect Mach-O by CONTENT, not extension: PyInstaller bundles
+# extension-less binaries (e.g. Python.framework/Versions/3.11/Python) that a
+# *.so/*.dylib filter misses — and the notary rejects any unsigned nested binary
+# ("signature of the binary is invalid" / "does not include a secure timestamp").
 WORKER_DIR="$APP_BUNDLE/Contents/Resources/worker"
 if [[ -d "$WORKER_DIR" ]]; then
     echo "===> signing nested worker Mach-O"
-    find "$WORKER_DIR" \( -name "*.so" -o -name "*.dylib" \) -print0 \
-        | while IFS= read -r -d '' lib; do
-            codesign --force --sign "$SIGN_IDENTITY" "${TIMESTAMP_FLAG[@]}" \
-                --options runtime "$lib"
+    find "$WORKER_DIR" -type f -print0 \
+        | while IFS= read -r -d '' f; do
+            if file -b "$f" | grep -q "Mach-O"; then
+                codesign --force --sign "$SIGN_IDENTITY" "${TIMESTAMP_FLAG[@]}" \
+                    --options runtime "$f"
+            fi
         done
-    codesign --force --sign "$SIGN_IDENTITY" "${TIMESTAMP_FLAG[@]}" \
-        --options runtime "$WORKER_DIR/call-capture-worker"
 fi
 
 codesign \
