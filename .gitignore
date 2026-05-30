@@ -45,3 +45,12 @@ CallCapture-*.zip
 # Env
 .env
 .env.local
+
+# Code-signing secrets — NEVER commit (public repo). The whole folder is
+# ignored, plus key material by extension as a backstop.
+/signing/
+*.p12
+*.p8
+*.cer
+*.key
+p12_password.txt
