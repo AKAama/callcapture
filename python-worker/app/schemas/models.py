@@ -22,6 +22,8 @@ class JobRequest(BaseModel, frozen=True):
     whisper_model: str = "base"
     llm_engine: str = "claude"
     remote_provider: str = "groq"
+    stt_rates_per_min: dict[str, float] = Field(default_factory=dict)
+    llm_fallback_rate_per_1m: float | None = None
 
 
 class ProgressUpdate(BaseModel, frozen=True):
@@ -42,6 +44,11 @@ class JobResult(BaseModel, frozen=True):
     markdown_path: str | None = None
     analysis_path: str | None = None
     duration_sec: float | None = None
+    cost_transcription: float | None = None
+    cost_processing: float | None = None
+    cost_currency: str = "USD"
+    audio_minutes: float | None = None
+    llm_tokens: int | None = None
     warnings: list[str] = Field(default_factory=list)
     error_message: str | None = None
 

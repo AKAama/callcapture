@@ -26,6 +26,9 @@ struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identifiable 
     var engineUsed: String?
     var status: String
     var errorMessage: String?
+    var costTranscription: Double?
+    var costProcessing: Double?
+    var costCurrency: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -45,6 +48,9 @@ struct SessionRecord: Codable, FetchableRecord, PersistableRecord, Identifiable 
         case engineUsed = "engine_used"
         case status
         case errorMessage = "error_message"
+        case costTranscription = "cost_transcription"
+        case costProcessing = "cost_processing"
+        case costCurrency = "cost_currency"
     }
 
     /// Returns sessions ordered newest-first by `started_at`.
@@ -83,6 +89,9 @@ extension SessionRecord {
             language: language,
             notesLanguage: notesLanguage,
             analysisPath: analysisPath,
+            costTranscription: costTranscription,
+            costProcessing: costProcessing,
+            costCurrency: costCurrency,
             status: status
         )
     }
@@ -107,5 +116,8 @@ extension SessionRecord {
         self.engineUsed = nil
         self.status = session.status
         self.errorMessage = nil
+        self.costTranscription = session.costTranscription
+        self.costProcessing = session.costProcessing
+        self.costCurrency = session.costCurrency
     }
 }

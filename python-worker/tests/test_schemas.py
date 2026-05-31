@@ -182,3 +182,30 @@ class TestJobResult:
             warnings=["w1"],
         )
         assert r.error_message == "Something broke"
+
+
+def test_jobrequest_defaults_cost_rate_fields():
+    from app.schemas.models import JobRequest
+    req = JobRequest(job_id="x", command="transcribe", audio_path="/a.wav")
+    assert req.stt_rates_per_min == {}
+    assert req.llm_fallback_rate_per_1m is None
+
+
+def test_jobrequest_accepts_rate_fields():
+    from app.schemas.models import JobRequest
+    req = JobRequest.model_validate_json(
+        '{"job_id":"x","command":"transcribe","audio_path":"/a.wav",'
+        '"stt_rates_per_min":{"assemblyai":0.01},"llm_fallback_rate_per_1m":2.5}'
+    )
+    assert req.stt_rates_per_min["assemblyai"] == 0.01
+    assert req.llm_fallback_rate_per_1m == 2.5
+
+
+def test_jobresult_defaults_cost_fields_none():
+    from app.schemas.models import JobResult
+    r = JobResult(job_id="x", status="completed")
+    assert r.cost_transcription is None
+    assert r.cost_processing is None
+    assert r.cost_currency == "USD"
+    assert r.audio_minutes is None
+    assert r.llm_tokens is None

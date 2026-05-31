@@ -17,7 +17,9 @@ from app.analyze.insights import analyze_insights
 from app.analyze.metrics import compute_speaker_stats
 from app.analyze.sentiment import analyze_sentiment
 from app.export.writer import write_markdown, write_raw_transcript
+from app.postprocess import pricing
 from app.postprocess.formatter import render_markdown, render_note
+from app.postprocess.llm_client import get_usage, reset_usage
 from app.postprocess.markdown import generate_markdown
 from app.schemas.models import (
     ConversationAnalysis,
@@ -128,9 +130,46 @@ def _write_analysis(
     return analysis_path
 
 
+def _count_stems(audio_path: str) -> int:
+    """2 when mic+system stems exist (both transcribed), else 1."""
+    base = os.path.splitext(audio_path)[0]
+    mic = f"{base}_mic.wav"
+    system = f"{base}_system.wav"
+    return 2 if os.path.exists(mic) and os.path.exists(system) else 1
+
+
+def _compute_costs(request: JobRequest, duration_sec: float | None) -> dict:
+    """USD cost breakdown for this job, plus raw usage for later recompute."""
+    minutes = (duration_sec or 0.0) / 60.0
+    provider = request.remote_provider if request.engine == "remote" else "local_whisper"
+    rates = pricing.merge_rates(request.stt_rates_per_min)
+    cost_t = pricing.transcription_cost(
+        minutes, provider, _count_stems(request.audio_path), rates
+    )
+
+    usage = get_usage()
+    if request.llm_engine.startswith("local"):
+        cost_p = 0.0
+    else:
+        fallback = request.llm_fallback_rate_per_1m
+        if fallback is None:
+            fallback = pricing.DEFAULT_LLM_FALLBACK_RATE_PER_1M
+        cost_p = pricing.processing_cost(usage.actual_cost, usage.total_tokens, fallback)
+
+    return {
+        "cost_transcription": round(cost_t, 6),
+        "cost_processing": round(cost_p, 6),
+        "cost_currency": "USD",
+        "audio_minutes": round(minutes, 4),
+        "llm_tokens": usage.total_tokens,
+    }
+
+
 def _run_pipeline(request: JobRequest) -> JobResult:
     """Execute the full transcribe -> postprocess -> export pipeline."""
     warnings: list[str] = []
+
+    reset_usage()
 
     report_progress(request.job_id, 0.0, "starting")
 
@@ -198,6 +237,7 @@ def _run_pipeline(request: JobRequest) -> JobResult:
 
     report_progress(request.job_id, 1.0, "done")
 
+    costs = _compute_costs(request, duration_sec)
     return JobResult(
         job_id=request.job_id,
         status="completed",
@@ -206,6 +246,7 @@ def _run_pipeline(request: JobRequest) -> JobResult:
         analysis_path=analysis_path,
         duration_sec=duration_sec,
         warnings=warnings,
+        **costs,
     )
 
 

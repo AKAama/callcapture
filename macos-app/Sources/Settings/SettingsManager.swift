@@ -66,6 +66,32 @@ final class SettingsManager {
         didSet { persist("local_llm_base_url", localLLMBaseURL) }
     }
 
+    // MARK: - Pricing (USD). Defaults mirror python-worker/app/postprocess/pricing.py.
+    var sttRateAssemblyAI: Double = 0.0035 { didSet { persist("stt_rate_assemblyai", String(sttRateAssemblyAI)) } }
+    var sttRateDeepgram: Double = 0.0043 { didSet { persist("stt_rate_deepgram", String(sttRateDeepgram)) } }
+    var sttRateOpenAI: Double = 0.0060 { didSet { persist("stt_rate_openai", String(sttRateOpenAI)) } }
+    var sttRateGroq: Double = 0.0007 { didSet { persist("stt_rate_groq", String(sttRateGroq)) } }
+    var llmFallbackRatePer1M: Double = 3.00 { didSet { persist("llm_fallback_rate_per_1m", String(llmFallbackRatePer1M)) } }
+
+    /// STT $/min keyed by the worker's provider names, for the JobRequest.
+    var sttRatesPerMin: [String: Double] {
+        [
+            "assemblyai": sttRateAssemblyAI,
+            "deepgram": sttRateDeepgram,
+            "openai": sttRateOpenAI,
+            "groq": sttRateGroq,
+            "local_whisper": 0.0,
+        ]
+    }
+
+    func resetPricingToDefaults() {
+        sttRateAssemblyAI = 0.0035
+        sttRateDeepgram = 0.0043
+        sttRateOpenAI = 0.0060
+        sttRateGroq = 0.0007
+        llmFallbackRatePer1M = 3.00
+    }
+
     var outputDirectory: String = defaultOutputDirectory { didSet { persist("output_directory", outputDirectory) } }
     var obsidianExportDirectory: String = "" { didSet { persist("obsidian_export_directory", obsidianExportDirectory) } }
     var obsidianFolderPattern: String = "_meetings/{YYYY-MM}/" { didSet { persist("obsidian_folder_pattern", obsidianFolderPattern) } }
@@ -147,6 +173,11 @@ final class SettingsManager {
         if let raw = rows["llm_provider"], let val = LLMProvider(rawValue: raw) { llmProvider = val }
         if let raw = rows["llm_model"], !raw.isEmpty { llmModel = raw }
         if let raw = rows["local_llm_base_url"], !raw.isEmpty { localLLMBaseURL = raw }
+        if let raw = rows["stt_rate_assemblyai"], let v = Double(raw) { sttRateAssemblyAI = v }
+        if let raw = rows["stt_rate_deepgram"], let v = Double(raw) { sttRateDeepgram = v }
+        if let raw = rows["stt_rate_openai"], let v = Double(raw) { sttRateOpenAI = v }
+        if let raw = rows["stt_rate_groq"], let v = Double(raw) { sttRateGroq = v }
+        if let raw = rows["llm_fallback_rate_per_1m"], let v = Double(raw) { llmFallbackRatePer1M = v }
 
         // API keys live in Keychain, not SQLite.
         remoteApiKey = KeychainHelper.load(for: "remote_api_key")

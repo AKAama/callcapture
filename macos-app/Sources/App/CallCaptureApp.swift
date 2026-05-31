@@ -274,6 +274,12 @@ final class AppModel {
                 id: session.id,
                 analysisPath: result.analysisPath
             )
+            sessionManager.updateSessionCost(
+                id: session.id,
+                costTranscription: result.costTranscription,
+                costProcessing: result.costProcessing,
+                costCurrency: result.costCurrency
+            )
             sessionManager.updateSessionStatus(
                 id: session.id,
                 status: "transcribed"

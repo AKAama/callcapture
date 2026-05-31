@@ -14,6 +14,8 @@ struct JobRequest: Codable, Sendable {
     let remoteProvider: String
     let recordingType: String
     let notesLanguage: String
+    let sttRatesPerMin: [String: Double]
+    let llmFallbackRatePer1M: Double
 
     enum CodingKeys: String, CodingKey {
         case jobId = "job_id"
@@ -27,6 +29,8 @@ struct JobRequest: Codable, Sendable {
         case remoteProvider = "remote_provider"
         case recordingType = "recording_type"
         case notesLanguage = "notes_language"
+        case sttRatesPerMin = "stt_rates_per_min"
+        case llmFallbackRatePer1M = "llm_fallback_rate_per_1m"
     }
 
     /// Creates a default transcription request for a given audio file.
@@ -48,7 +52,9 @@ struct JobRequest: Codable, Sendable {
             llmEngine: llmEngine,
             remoteProvider: remoteProvider,
             recordingType: "call_meeting",
-            notesLanguage: "auto"
+            notesLanguage: "auto",
+            sttRatesPerMin: [:],
+            llmFallbackRatePer1M: 3.0
         )
     }
 
@@ -65,7 +71,9 @@ struct JobRequest: Codable, Sendable {
             llmEngine: "claude",
             remoteProvider: "groq",
             recordingType: "call_meeting",
-            notesLanguage: "auto"
+            notesLanguage: "auto",
+            sttRatesPerMin: [:],
+            llmFallbackRatePer1M: 3.0
         )
     }
 
@@ -97,7 +105,9 @@ struct JobRequest: Codable, Sendable {
             llmEngine: settings.llmEngine.rawValue,
             remoteProvider: provider,
             recordingType: session.recordingType,
-            notesLanguage: session.notesLanguage
+            notesLanguage: session.notesLanguage,
+            sttRatesPerMin: settings.sttRatesPerMin,
+            llmFallbackRatePer1M: settings.llmFallbackRatePer1M
         )
     }
 }
@@ -125,6 +135,9 @@ struct JobResult: Codable, Sendable {
     let markdownPath: String?
     let analysisPath: String?
     let durationSec: Double?
+    let costTranscription: Double?
+    let costProcessing: Double?
+    let costCurrency: String?
     let warnings: [String]
     let errorMessage: String?
 
@@ -135,6 +148,9 @@ struct JobResult: Codable, Sendable {
         case markdownPath = "markdown_path"
         case analysisPath = "analysis_path"
         case durationSec = "duration_sec"
+        case costTranscription = "cost_transcription"
+        case costProcessing = "cost_processing"
+        case costCurrency = "cost_currency"
         case warnings
         case errorMessage = "error_message"
     }
@@ -148,6 +164,9 @@ struct JobResult: Codable, Sendable {
             markdownPath: nil,
             analysisPath: nil,
             durationSec: nil,
+            costTranscription: nil,
+            costProcessing: nil,
+            costCurrency: nil,
             warnings: [message],
             errorMessage: message
         )

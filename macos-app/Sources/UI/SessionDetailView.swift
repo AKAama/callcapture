@@ -1,6 +1,20 @@
 import SwiftUI
 import OSLog
 
+/// USD cost formatting for the cost UI. 4 decimals (sub-cent calls are common).
+enum CostFormat {
+    static func usd(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "$%.4f", value)
+    }
+
+    /// Sum of the two parts, or nil if both are nil.
+    static func total(_ a: Double?, _ b: Double?) -> Double? {
+        if a == nil && b == nil { return nil }
+        return (a ?? 0) + (b ?? 0)
+    }
+}
+
 /// Full session detail view showing metadata, transcript previews,
 /// and action buttons for transcription and export.
 @available(macOS 14.2, *)
@@ -163,6 +177,14 @@ struct SessionDetailView: View {
                 }
                 if let duration = session.durationSec {
                     detailRow("Duration", formattedDuration(duration))
+                }
+                if current.costTranscription != nil || current.costProcessing != nil {
+                    detailRow(
+                        "Cost",
+                        "Transcription \(CostFormat.usd(current.costTranscription)) · "
+                        + "Processing \(CostFormat.usd(current.costProcessing)) · "
+                        + "Total \(CostFormat.usd(CostFormat.total(current.costTranscription, current.costProcessing)))"
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
