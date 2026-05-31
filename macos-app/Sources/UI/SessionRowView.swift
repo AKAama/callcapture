@@ -32,6 +32,11 @@ struct SessionRowView: View {
                 }
             }
             Spacer()
+            if let total = CostFormat.total(session.costTranscription, session.costProcessing) {
+                Text(CostFormat.usd(total))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             StatusBadge(status: session.status)
         }
         .padding(.vertical, 4)
