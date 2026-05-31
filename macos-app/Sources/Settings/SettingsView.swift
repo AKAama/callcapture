@@ -12,6 +12,7 @@ struct SettingsView: View {
             transcriptionSection(settings: settings)
             apiKeysSection(settings: settings)
             postProcessingSection(settings: settings)
+            pricingSection(settings: settings)
             speakerSection(settings: settings)
             exportSection(settings: settings)
         }
@@ -127,6 +128,40 @@ struct SettingsView: View {
             }
 
             Toggle("Auto-process on stop", isOn: $settings.autoProcessOnStop)
+        }
+    }
+
+    @ViewBuilder
+    private func pricingSection(settings: SettingsManager) -> some View {
+        @Bindable var settings = settings
+        Section("Pricing (USD)") {
+            LabeledContent("AssemblyAI $/min") {
+                TextField("0.0035", value: $settings.sttRateAssemblyAI, format: .number)
+                    .frame(width: 90).multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Deepgram $/min") {
+                TextField("0.0043", value: $settings.sttRateDeepgram, format: .number)
+                    .frame(width: 90).multilineTextAlignment(.trailing)
+            }
+            LabeledContent("OpenAI $/min") {
+                TextField("0.0060", value: $settings.sttRateOpenAI, format: .number)
+                    .frame(width: 90).multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Groq $/min") {
+                TextField("0.0007", value: $settings.sttRateGroq, format: .number)
+                    .frame(width: 90).multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Local Whisper") {
+                Text("$0.00").foregroundStyle(.secondary)
+            }
+            LabeledContent("LLM fallback $/1M tokens") {
+                TextField("3.00", value: $settings.llmFallbackRatePer1M, format: .number)
+                    .frame(width: 90).multilineTextAlignment(.trailing)
+            }
+            Text("OpenRouter reports actual cost; the fallback rate is used only when it can't.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("Reset to defaults") { settings.resetPricingToDefaults() }
         }
     }
 
