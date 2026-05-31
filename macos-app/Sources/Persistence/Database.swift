@@ -126,6 +126,14 @@ final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v5_costColumns") { db in
+            try db.alter(table: "session") { t in
+                t.add(column: "cost_transcription", .double)
+                t.add(column: "cost_processing", .double)
+                t.add(column: "cost_currency", .text)
+            }
+        }
+
         return migrator
     }
 }

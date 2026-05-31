@@ -17,4 +17,18 @@ struct DatabaseMigrationTests {
         #expect(columns.contains("analysis_path"))
         try? FileManager.default.removeItem(atPath: path)
     }
+
+    @Test("v5 adds cost_transcription, cost_processing, cost_currency columns")
+    func v5AddsCostColumns() throws {
+        let dir = NSTemporaryDirectory()
+        let path = dir + "cc-test-\(UUID().uuidString).db"
+        let db = try AppDatabase(path: path)
+        let columns = try db.dbPool.read { database in
+            try database.columns(in: "session").map(\.name)
+        }
+        #expect(columns.contains("cost_transcription"))
+        #expect(columns.contains("cost_processing"))
+        #expect(columns.contains("cost_currency"))
+        try? FileManager.default.removeItem(atPath: path)
+    }
 }
