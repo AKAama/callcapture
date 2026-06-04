@@ -62,7 +62,12 @@ The app spawns the worker as a subprocess, sends a `JobRequest` on stdin, and re
 ```bash
 brew tap bodharma/callcapture
 brew install --cask callcapture
+
+# update to the latest release later:
+brew upgrade --cask callcapture
 ```
+
+Notarized by Apple — it opens with a normal double-click, no Gatekeeper bypass.
 
 > The packaged app uses **cloud transcription** (AssemblyAI / Deepgram) plus full
 > on-device analysis (diarization, sentiment, emotion, insights). **On-device
