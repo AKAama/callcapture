@@ -20,12 +20,12 @@ final class PCMChunkBuffer: @unchecked Sendable {
     ///
     /// Returns one when either the oldest queued chunk was evicted at capacity
     /// or the incoming chunk was discarded because another operation holds the
-    /// lock. Returns zero otherwise, including when the buffer is finished.
+    /// lock or the buffer is finished. Returns zero otherwise.
     func push(_ data: Data) -> Int {
         guard lock.try() else { return 1 }
         defer { lock.unlock() }
 
-        guard !isFinished else { return 0 }
+        guard !isFinished else { return 1 }
 
         let discarded = chunks.count == capacity ? 1 : 0
         if discarded == 1 {
