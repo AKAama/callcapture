@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// A thread-safe, bounded FIFO queue for PCM chunks awaiting transmission.
 ///
@@ -9,6 +10,7 @@ final class PCMChunkBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var chunks: [Data] = []
     private var isFinished = false
+    private var totalDiscarded: Int64 = 0
 
     init(capacity: Int) {
         precondition(capacity > 0, "PCMChunkBuffer capacity must be positive")
@@ -22,14 +24,21 @@ final class PCMChunkBuffer: @unchecked Sendable {
     /// or the incoming chunk was discarded because another operation holds the
     /// lock or the buffer is finished. Returns zero otherwise.
     func push(_ data: Data) -> Int {
-        guard lock.try() else { return 1 }
+        guard lock.try() else {
+            recordDiscard()
+            return 1
+        }
         defer { lock.unlock() }
 
-        guard !isFinished else { return 1 }
+        guard !isFinished else {
+            recordDiscard()
+            return 1
+        }
 
         let discarded = chunks.count == capacity ? 1 : 0
         if discarded == 1 {
             chunks.removeFirst()
+            recordDiscard()
         }
         chunks.append(data)
         return discarded
@@ -59,5 +68,36 @@ final class PCMChunkBuffer: @unchecked Sendable {
 
         chunks.removeAll(keepingCapacity: true)
         isFinished = false
+        resetDiscardCount()
+    }
+
+    /// Total chunks discarded since initialization or the most recent clear.
+    ///
+    /// The counter includes capacity eviction, finished-buffer rejection, and
+    /// incoming chunks dropped because `push(_:)` could not immediately take
+    /// the queue lock.
+    var discardedCount: Int {
+        Int(OSAtomicAdd64Barrier(0, &totalDiscarded))
+    }
+
+    /// `true` once producers have finished and every accepted chunk was read.
+    var isFinishedAndEmpty: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isFinished && chunks.isEmpty
+    }
+
+    private func recordDiscard() {
+        OSAtomicIncrement64Barrier(&totalDiscarded)
+    }
+
+    private func resetDiscardCount() {
+        while true {
+            let current = OSAtomicAdd64Barrier(0, &totalDiscarded)
+            guard current != 0 else { return }
+            if OSAtomicCompareAndSwap64Barrier(current, 0, &totalDiscarded) {
+                return
+            }
+        }
     }
 }

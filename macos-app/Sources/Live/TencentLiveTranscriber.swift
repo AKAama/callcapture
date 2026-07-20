@@ -107,7 +107,7 @@ private struct SystemTencentTranscriberScheduler: TencentTranscriberScheduler {
 /// The actor owns one event stream and one connection state machine. It never
 /// logs request URLs, credentials, audio frames, service JSON, or transcript
 /// text. Transport failures exposed to callers are deliberately fixed errors.
-actor TencentLiveTranscriber: LiveTranscriber {
+actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateReporting {
     enum State: Equatable, Sendable {
         case idle
         case connecting
@@ -131,8 +131,14 @@ actor TencentLiveTranscriber: LiveTranscriber {
     private let voiceID: @Sendable () -> String
     private let eventContinuation: AsyncThrowingStream<TranscriptEvent, Error>.Continuation
     nonisolated let eventStream: AsyncThrowingStream<TranscriptEvent, Error>
+    private let connectionStateContinuation: AsyncStream<LiveTranscriberConnectionState>.Continuation
+    nonisolated let connectionStateStream: AsyncStream<LiveTranscriberConnectionState>
 
-    private(set) var state: State = .idle
+    private(set) var state: State = .idle {
+        didSet {
+            connectionStateContinuation.yield(Self.connectionState(for: state))
+        }
+    }
     private var configuration: ASRConfiguration?
     private var connection: (any TencentWebSocketConnection)?
     private var authenticatingConnection: (any TencentWebSocketConnection)?
@@ -174,6 +180,9 @@ actor TencentLiveTranscriber: LiveTranscriber {
         let pair = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
         eventStream = pair.stream
         eventContinuation = pair.continuation
+        let statePair = AsyncStream<LiveTranscriberConnectionState>.makeStream()
+        connectionStateStream = statePair.stream
+        connectionStateContinuation = statePair.continuation
         self.transport = transport
         self.signer = signer
         self.decoder = decoder
@@ -257,6 +266,10 @@ actor TencentLiveTranscriber: LiveTranscriber {
         eventStream
     }
 
+    nonisolated func connectionStateUpdates() -> AsyncStream<LiveTranscriberConnectionState> {
+        connectionStateStream
+    }
+
     func finish() async {
         await acquireSendSlot()
         defer { releaseSendSlot() }
@@ -313,6 +326,17 @@ actor TencentLiveTranscriber: LiveTranscriber {
 }
 
 private extension TencentLiveTranscriber {
+    static func connectionState(for state: State) -> LiveTranscriberConnectionState {
+        switch state {
+        case .idle: .idle
+        case .connecting: .connecting
+        case .live: .live
+        case .reconnecting: .reconnecting
+        case .finished: .finished
+        case .failed: .failed
+        }
+    }
+
     struct CompletionEnvelope: Decodable {
         let final: Int?
     }
@@ -657,6 +681,7 @@ private extension TencentLiveTranscriber {
         } else {
             eventContinuation.finish()
         }
+        connectionStateContinuation.finish()
     }
 
     func errorForCurrentState() -> TencentLiveTranscriberError {

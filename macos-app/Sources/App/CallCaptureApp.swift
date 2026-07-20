@@ -54,6 +54,7 @@ struct CallCaptureApp: App {
 /// Central application model holding shared state across the UI.
 @available(macOS 14.2, *)
 @Observable
+@MainActor
 final class AppModel {
     /// Process-wide reference used by `AppDelegate` to tear down audio and
     /// worker resources on quit/signal, where SwiftUI environment access is
@@ -75,7 +76,9 @@ final class AppModel {
     var selectedMicUID: String?
     var selectedRecordingType: RecordingType = .callMeeting
 
-    let captureManager = AudioCaptureManager()
+    let captureManager: AudioCaptureManager
+    let liveTranscriptStore: LiveTranscriptStore
+    let liveMeetingCoordinator: LiveMeetingCoordinator
     let sessionManager: SessionManager
     let settingsManager: SettingsManager
     let pythonBridge = PythonBridge()
@@ -94,6 +97,23 @@ final class AppModel {
     ///
     /// - Parameter database: The GRDB-backed application database.
     init(database: AppDatabase) {
+        let captureManager = AudioCaptureManager()
+        let liveTranscriptStore = LiveTranscriptStore()
+        self.captureManager = captureManager
+        self.liveTranscriptStore = liveTranscriptStore
+        self.liveMeetingCoordinator = LiveMeetingCoordinator(
+            capture: captureManager,
+            transcriptStore: liveTranscriptStore,
+            transcriberFactory: { TencentLiveTranscriber() },
+            configurationProvider: {
+                ASRConfiguration(
+                    appID: KeychainHelper.load(for: "tencent_asr_app_id"),
+                    secretID: KeychainHelper.load(for: "tencent_asr_secret_id"),
+                    secretKey: KeychainHelper.load(for: "tencent_asr_secret_key"),
+                    voiceID: UUID().uuidString
+                )
+            }
+        )
         self.sessionManager = SessionManager(database: database)
         self.settingsManager = SettingsManager(database: database)
         AppModel.shared = self
@@ -122,6 +142,7 @@ final class AppModel {
     /// Synchronously releases audio capture and any running worker process.
     /// Called from `AppDelegate` on app termination and catchable signals.
     func teardownForExit() {
+        liveMeetingCoordinator.shutdown()
         transcriptionTask?.cancel()
         pythonBridge.cancelCurrentJob()
         captureManager.emergencyStop()

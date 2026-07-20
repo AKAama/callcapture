@@ -27,7 +27,7 @@ struct ASRConfiguration: Sendable {
 }
 
 /// Provider-neutral interface for a live speech-to-text connection.
-protocol LiveTranscriber {
+protocol LiveTranscriber: Sendable {
     func connect(configuration: ASRConfiguration) async throws
     func send(_ pcm: Data) async throws
     func events() -> AsyncThrowingStream<TranscriptEvent, Error>

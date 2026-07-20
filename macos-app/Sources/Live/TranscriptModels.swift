@@ -22,5 +22,5 @@ enum LiveConnectionState: Equatable, Sendable {
     case live
     case reconnecting
     case review
-    case failed
+    case error
 }
