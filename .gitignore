@@ -30,6 +30,7 @@ models/
 
 # Agent / local session logs
 .claude/
+.worktrees/
 
 # Local data (never commit recordings or the session DB)
 *.wav
