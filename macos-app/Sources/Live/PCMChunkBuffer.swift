@@ -16,11 +16,13 @@ final class PCMChunkBuffer: @unchecked Sendable {
         chunks.reserveCapacity(capacity)
     }
 
-    /// Enqueues a chunk, evicting the oldest queued chunk if necessary.
+    /// Enqueues a chunk without waiting for the buffer lock.
     ///
-    /// Returns the number of chunks evicted by this call.
+    /// Returns one when either the oldest queued chunk was evicted at capacity
+    /// or the incoming chunk was discarded because another operation holds the
+    /// lock. Returns zero otherwise, including when the buffer is finished.
     func push(_ data: Data) -> Int {
-        lock.lock()
+        guard lock.try() else { return 1 }
         defer { lock.unlock() }
 
         guard !isFinished else { return 0 }

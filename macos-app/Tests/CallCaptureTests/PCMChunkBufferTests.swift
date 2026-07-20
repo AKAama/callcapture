@@ -4,8 +4,8 @@ import Testing
 
 @Suite("PCMChunkBuffer")
 struct PCMChunkBufferTests {
-    @Test("满载时丢弃最旧数据")
-    func dropsOldest() {
+    @Test("满载时丢弃最旧数据并报告一次丢弃")
+    func dropsOldestAndReportsDiscard() {
         let buffer = PCMChunkBuffer(capacity: 2)
 
         #expect(buffer.push(Data([1])) == 0)
