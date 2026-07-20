@@ -4,6 +4,73 @@ import Testing
 
 @Suite("TencentLiveTranscriber")
 struct TencentLiveTranscriberTests {
+    @Test("connect 等待腾讯 code=0 确认且保留重叠的首个字幕事件")
+    func waitsForApplicationHandshake() async throws {
+        let connection = FakeTencentWebSocketConnection(initialInbound: [])
+        let transport = FakeTencentWebSocketTransport([.connection(connection)])
+        let scheduler = FakeTencentTranscriberScheduler()
+        let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
+        let connectTask = Task<Result<Void, Error>, Never> {
+            do {
+                try await transcriber.connect(configuration: configuration)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+
+        try await waitUntil { await connection.hasPendingReceive }
+        #expect(await transcriber.state == .connecting)
+        do {
+            try await transcriber.send(Data(repeating: 1, count: 6_400))
+            Issue.record("Expected send before authentication to fail")
+        } catch {
+            #expect(error as? TencentLiveTranscriberError == .notConnected)
+        }
+        #expect(await connection.sentMessages.isEmpty)
+
+        await connection.enqueue(.text(
+            #"{"code":0,"message":"success","sentences":{"sentence_list":[{"sentence":"首帧字幕","sentence_type":0,"sentence_id":0,"speaker_id":-1,"start_time":0,"end_time":200}]}}"#
+        ))
+        switch await connectTask.value {
+        case .success:
+            break
+        case .failure:
+            Issue.record("Expected code=0 handshake to connect")
+        }
+
+        var iterator = transcriber.events().makeAsyncIterator()
+        #expect(try await iterator.next() == .partial(
+            id: "0",
+            speakerID: nil,
+            text: "首帧字幕",
+            startMS: 0,
+            endMS: 200
+        ))
+        #expect(await transcriber.state == .live)
+        await transcriber.cancel()
+    }
+
+    @Test("腾讯鉴权错误使 connect 失败且不发送音频")
+    func rejectsFailedApplicationHandshake() async {
+        let connection = FakeTencentWebSocketConnection(initialInbound: [.text(
+            #"{"code":4002,"message":"credential-marker"}"#
+        )])
+        let transport = FakeTencentWebSocketTransport([.connection(connection)])
+        let scheduler = FakeTencentTranscriberScheduler()
+        let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
+
+        do {
+            try await transcriber.connect(configuration: configuration)
+            Issue.record("Expected authentication failure")
+        } catch {
+            #expect(error as? TencentTranscriptDecoderError == .service(code: 4_002))
+            #expect(!String(describing: error).contains("credential-marker"))
+        }
+        #expect(await transcriber.state == .failed)
+        #expect(await connection.sentMessages.isEmpty)
+    }
+
     @Test("连接成功后进入 live，重复连接返回明确错误")
     func connectsOnce() async throws {
         let connection = FakeTencentWebSocketConnection()
@@ -109,6 +176,30 @@ struct TencentLiveTranscriberTests {
         #expect(await transcriber.state == .finished)
     }
 
+    @Test("end 发送与接收同时失败时保持 failed 终态")
+    func preservesFailureDuringEndRace() async throws {
+        let connection = FakeTencentWebSocketConnection()
+        let transport = FakeTencentWebSocketTransport([.connection(connection)])
+        let scheduler = FakeTencentTranscriberScheduler()
+        let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
+        try await transcriber.connect(configuration: configuration)
+        await connection.blockNextEndSend()
+        let terminal = nextEventResult(from: transcriber)
+        let finishTask = Task { await transcriber.finish() }
+
+        try await waitUntil { await connection.hasBlockedSend }
+        await connection.failInbound()
+        await finishTask.value
+
+        switch await terminal.value {
+        case .success:
+            Issue.record("Expected terminal connection failure")
+        case let .failure(error):
+            #expect(error as? TencentLiveTranscriberError == .connectionFailed)
+        }
+        #expect(await transcriber.state == .failed)
+    }
+
     @Test("服务端错误终止事件流且不暴露响应内容")
     func handlesRedactedServiceError() async throws {
         let connection = FakeTencentWebSocketConnection()
@@ -198,6 +289,107 @@ struct TencentLiveTranscriberTests {
         await transcriber.cancel()
     }
 
+    @Test("重连鉴权失败会计入退避并尝试下一条新连接")
+    func retriesARejectedReconnectHandshake() async throws {
+        let first = FakeTencentWebSocketConnection()
+        let rejected = FakeTencentWebSocketConnection(initialInbound: [
+            .text(#"{"code":4002,"message":"redacted"}"#),
+        ])
+        let recovered = FakeTencentWebSocketConnection()
+        let transport = FakeTencentWebSocketTransport([
+            .connection(first),
+            .connection(rejected),
+            .connection(recovered),
+        ])
+        let scheduler = FakeTencentTranscriberScheduler()
+        let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
+        try await transcriber.connect(configuration: configuration)
+        let eventTask = nextEventResult(from: transcriber)
+
+        await first.failInbound()
+        await recovered.enqueue(.text(
+            #"{"code":0,"sentences":{"sentence_list":[{"sentence":"恢复","sentence_type":1,"sentence_id":2,"speaker_id":1,"start_time":200,"end_time":400}]}}"#
+        ))
+
+        switch await eventTask.value {
+        case let .success(event):
+            #expect(event == .confirmed(
+                id: "2",
+                speakerID: "1",
+                text: "恢复",
+                startMS: 200,
+                endMS: 400
+            ))
+        case .failure:
+            Issue.record("Expected recovery after rejected handshake")
+        }
+        #expect(await transport.connectionAttempts == 3)
+        #expect(await scheduler.recordedSleeps == [200_000_000, 400_000_000])
+        #expect(await transcriber.state == .live)
+        await transcriber.cancel()
+    }
+
+    @Test("旧连接延迟完成的发送会在新代连接上重发")
+    func resendsAStaleDelayedFrameAfterReconnect() async throws {
+        let first = FakeTencentWebSocketConnection(cancelCompletesBlockedSend: false)
+        let second = FakeTencentWebSocketConnection()
+        let transport = FakeTencentWebSocketTransport([
+            .connection(first),
+            .connection(second),
+        ])
+        let scheduler = FakeTencentTranscriberScheduler()
+        let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
+        try await transcriber.connect(configuration: configuration)
+        await first.blockNextDataSend()
+        let frame = Data(repeating: 9, count: 6_400)
+        let sendTask = Task { try await transcriber.send(frame) }
+
+        try await waitUntil { await first.hasBlockedSend }
+        await first.failInbound()
+        try await waitUntil {
+            let attempts = await transport.connectionAttempts
+            let state = await transcriber.state
+            return attempts == 2 && state == .live
+        }
+        await first.completeBlockedSendSuccessfully()
+        try await sendTask.value
+
+        #expect(await first.sentMessages == [.data(frame)])
+        #expect(await second.sentMessages == [.data(frame)])
+        await transcriber.cancel()
+    }
+
+    @Test("重连鉴权期间取消会关闭候选连接且不继续重试")
+    func cancelsDuringReconnectAuthentication() async throws {
+        let first = FakeTencentWebSocketConnection()
+        let second = FakeTencentWebSocketConnection(initialInbound: [])
+        let transport = FakeTencentWebSocketTransport([
+            .connection(first),
+            .connection(second),
+            .failure,
+            .failure,
+        ])
+        let scheduler = FakeTencentTranscriberScheduler()
+        let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
+        try await transcriber.connect(configuration: configuration)
+        let terminal = nextEventResult(from: transcriber)
+
+        await first.failInbound()
+        try await waitUntil { await second.hasPendingReceive }
+        #expect(await transcriber.state == .reconnecting)
+        await transcriber.cancel()
+
+        switch await terminal.value {
+        case let .success(event):
+            #expect(event == nil)
+        case .failure:
+            Issue.record("Expected clean cancellation")
+        }
+        #expect(await transcriber.state == .finished)
+        #expect(await second.wasCancelled)
+        #expect(await transport.connectionAttempts == 2)
+    }
+
     @Test("最多进行三次有界指数退避重连")
     func stopsAfterThreeReconnectAttempts() async throws {
         let first = FakeTencentWebSocketConnection()
@@ -276,6 +468,15 @@ private extension TencentLiveTranscriberTests {
             }
         }
     }
+
+    func waitUntil(_ predicate: @escaping @Sendable () async -> Bool) async throws {
+        for _ in 0..<10_000 {
+            if await predicate() { return }
+            await Task.yield()
+        }
+        Issue.record("Timed out waiting for deterministic test condition")
+        throw FakeTencentTransportError.unavailable
+    }
 }
 
 private enum FakeTencentTransportError: Error {
@@ -286,11 +487,44 @@ private actor FakeTencentWebSocketConnection: TencentWebSocketConnection {
     private var queuedInbound: [TencentWebSocketMessage] = []
     private var inboundWaiter: CheckedContinuation<Result<TencentWebSocketMessage, Error>, Never>?
     private var inboundFailed = false
+    private var blockedSendKind: BlockedSendKind?
+    private var blockedSendWaiter: CheckedContinuation<Result<Void, Error>, Never>?
+    private let cancelCompletesBlockedSend: Bool
     private(set) var sentMessages: [TencentWebSocketMessage] = []
     private(set) var wasCancelled = false
 
+    enum BlockedSendKind {
+        case data
+        case end
+    }
+
+    init(
+        initialInbound: [TencentWebSocketMessage] = [
+            .text(#"{"code":0,"message":"success"}"#),
+        ],
+        cancelCompletesBlockedSend: Bool = true
+    ) {
+        queuedInbound = initialInbound
+        self.cancelCompletesBlockedSend = cancelCompletesBlockedSend
+    }
+
+    var hasPendingReceive: Bool {
+        inboundWaiter != nil
+    }
+
+    var hasBlockedSend: Bool {
+        blockedSendWaiter != nil
+    }
+
     func send(_ message: TencentWebSocketMessage) async throws {
         guard !wasCancelled else { throw FakeTencentTransportError.unavailable }
+        if shouldBlock(message) {
+            blockedSendKind = nil
+            let result: Result<Void, Error> = await withCheckedContinuation { continuation in
+                blockedSendWaiter = continuation
+            }
+            try result.get()
+        }
         sentMessages.append(message)
     }
 
@@ -310,6 +544,10 @@ private actor FakeTencentWebSocketConnection: TencentWebSocketConnection {
         inboundFailed = true
         inboundWaiter?.resume(returning: .failure(FakeTencentTransportError.unavailable))
         inboundWaiter = nil
+        if cancelCompletesBlockedSend {
+            blockedSendWaiter?.resume(returning: .failure(FakeTencentTransportError.unavailable))
+            blockedSendWaiter = nil
+        }
     }
 
     func enqueue(_ message: TencentWebSocketMessage) {
@@ -326,6 +564,30 @@ private actor FakeTencentWebSocketConnection: TencentWebSocketConnection {
         if let inboundWaiter {
             self.inboundWaiter = nil
             inboundWaiter.resume(returning: .failure(FakeTencentTransportError.unavailable))
+        }
+    }
+
+    func blockNextDataSend() {
+        blockedSendKind = .data
+    }
+
+    func blockNextEndSend() {
+        blockedSendKind = .end
+    }
+
+    func completeBlockedSendSuccessfully() {
+        blockedSendWaiter?.resume(returning: .success(()))
+        blockedSendWaiter = nil
+    }
+
+    private func shouldBlock(_ message: TencentWebSocketMessage) -> Bool {
+        switch (blockedSendKind, message) {
+        case (.data, .data(_)):
+            true
+        case (.end, .text(#"{"type":"end"}"#)):
+            true
+        default:
+            false
         }
     }
 }

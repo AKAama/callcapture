@@ -135,6 +135,7 @@ actor TencentLiveTranscriber: LiveTranscriber {
     private(set) var state: State = .idle
     private var configuration: ASRConfiguration?
     private var connection: (any TencentWebSocketConnection)?
+    private var authenticatingConnection: (any TencentWebSocketConnection)?
     private var connectionGeneration = 0
     private var reconnectAttempts = 0
     private var reconnectTask: Task<Bool, Never>?
@@ -142,6 +143,7 @@ actor TencentLiveTranscriber: LiveTranscriber {
     private var pendingPCM = Data()
     private var lastAudioSendNanoseconds: UInt64?
     private var finishRequested = false
+    private var streamTerminated = false
     private var isSending = false
     private var sendWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -189,27 +191,40 @@ actor TencentLiveTranscriber: LiveTranscriber {
 
         state = .connecting
         self.configuration = configuration
+        var candidate: (any TencentWebSocketConnection)?
 
         do {
             let url = try signedURL(configuration: configuration)
             let newConnection = try await transport.connect(to: url)
+            candidate = newConnection
             guard state == .connecting else {
                 await newConnection.cancel()
                 throw TencentLiveTranscriberError.finished
             }
 
+            authenticatingConnection = newConnection
+            let handshake = try await authenticate(newConnection)
+            guard state == .connecting else {
+                authenticatingConnection = nil
+                await newConnection.cancel()
+                throw TencentLiveTranscriberError.finished
+            }
+
+            authenticatingConnection = nil
             connectionGeneration += 1
             connection = newConnection
             state = .live
+            yield(handshake.events)
             startReceiving(on: newConnection, generation: connectionGeneration)
-        } catch let error as TencentLiveTranscriberError where error == .finished {
-            throw error
         } catch {
+            authenticatingConnection = nil
+            await candidate?.cancel()
             if state == .finished {
                 throw TencentLiveTranscriberError.finished
             }
-            await fail(with: TencentLiveTranscriberError.connectionFailed)
-            throw TencentLiveTranscriberError.connectionFailed
+            let safeError = sanitized(error)
+            await fail(with: safeError)
+            throw safeError
         }
     }
 
@@ -278,25 +293,33 @@ actor TencentLiveTranscriber: LiveTranscriber {
     }
 
     func cancel() async {
-        guard state != .finished, state != .failed else { return }
+        guard !streamTerminated else { return }
         finishRequested = true
         reconnectTask?.cancel()
         reconnectTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         let connection = self.connection
+        let authenticatingConnection = self.authenticatingConnection
         self.connection = nil
+        self.authenticatingConnection = nil
         configuration = nil
         pendingPCM.removeAll(keepingCapacity: false)
         state = .finished
-        eventContinuation.finish()
+        terminateEventStream()
         await connection?.cancel()
+        await authenticatingConnection?.cancel()
     }
 }
 
 private extension TencentLiveTranscriber {
     struct CompletionEnvelope: Decodable {
         let final: Int?
+    }
+
+    struct DecodedServerFrame {
+        let events: [TranscriptEvent]
+        let isFinal: Bool
     }
 
     func signedURL(configuration: ASRConfiguration) throws -> URL {
@@ -316,6 +339,51 @@ private extension TencentLiveTranscriber {
             voiceID: voiceID(),
             engineModelType: configuration.engineModelType
         )
+    }
+
+    func authenticate(
+        _ connection: any TencentWebSocketConnection
+    ) async throws -> DecodedServerFrame {
+        let frame = try decode(try await connection.receive())
+        guard !frame.isFinal else {
+            throw TencentTranscriptDecoderError.invalidResponse
+        }
+        return frame
+    }
+
+    func decode(_ message: TencentWebSocketMessage) throws -> DecodedServerFrame {
+        let data: Data
+        switch message {
+        case let .data(receivedData):
+            data = receivedData
+        case let .text(text):
+            data = Data(text.utf8)
+        }
+
+        let events = try decoder.decode(data)
+        let completion: CompletionEnvelope
+        do {
+            completion = try JSONDecoder().decode(CompletionEnvelope.self, from: data)
+        } catch {
+            throw TencentTranscriptDecoderError.invalidResponse
+        }
+        guard completion.final == nil || completion.final == 0 || completion.final == 1 else {
+            throw TencentTranscriptDecoderError.invalidResponse
+        }
+        return DecodedServerFrame(events: events, isFinal: completion.final == 1)
+    }
+
+    func yield(_ events: [TranscriptEvent]) {
+        for event in events {
+            eventContinuation.yield(event)
+        }
+    }
+
+    func sanitized(_ error: Error) -> Error {
+        if let error = error as? TencentTranscriptDecoderError { return error }
+        if let error = error as? TencentSignerError { return error }
+        if let error = error as? TencentLiveTranscriberError { return error }
+        return TencentLiveTranscriberError.connectionFailed
     }
 
     func startReceiving(
@@ -345,22 +413,10 @@ private extension TencentLiveTranscriber {
                   !Task.isCancelled
             else { return }
 
-            let data: Data
-            switch message {
-            case let .data(receivedData):
-                data = receivedData
-            case let .text(text):
-                data = Data(text.utf8)
-            }
-
             do {
-                let events = try decoder.decode(data)
-                let completion = try JSONDecoder().decode(CompletionEnvelope.self, from: data)
-                for event in events {
-                    eventContinuation.yield(event)
-                }
-
-                if completion.final == 1 {
+                let frame = try decode(message)
+                yield(frame.events)
+                if frame.isFinal {
                     await completeSuccessfully()
                     return
                 }
@@ -375,9 +431,9 @@ private extension TencentLiveTranscriber {
     }
 
     func connectionWasInterrupted(generation: Int) async {
-        guard generation == connectionGeneration else { return }
+        guard generation == connectionGeneration, state == .live else { return }
         if finishRequested {
-            await completeSuccessfully()
+            await fail(with: TencentLiveTranscriberError.connectionFailed)
             return
         }
         _ = await recover(from: generation)
@@ -428,22 +484,41 @@ private extension TencentLiveTranscriber {
                 return false
             }
 
+            var candidate: (any TencentWebSocketConnection)?
             do {
                 let url = try signedURL(configuration: retryConfiguration)
                 let newConnection = try await transport.connect(to: url)
+                candidate = newConnection
                 guard !Task.isCancelled, state == .reconnecting else {
                     await newConnection.cancel()
                     reconnectTask = nil
                     return false
                 }
 
+                authenticatingConnection = newConnection
+                let handshake = try await authenticate(newConnection)
+                guard !Task.isCancelled, state == .reconnecting else {
+                    authenticatingConnection = nil
+                    await newConnection.cancel()
+                    reconnectTask = nil
+                    return false
+                }
+
+                authenticatingConnection = nil
                 connectionGeneration += 1
                 connection = newConnection
                 state = .live
                 reconnectTask = nil
+                yield(handshake.events)
                 startReceiving(on: newConnection, generation: connectionGeneration)
                 return true
             } catch {
+                authenticatingConnection = nil
+                await candidate?.cancel()
+                guard !Task.isCancelled, state == .reconnecting else {
+                    reconnectTask = nil
+                    return false
+                }
                 continue
             }
         }
@@ -471,7 +546,14 @@ private extension TencentLiveTranscriber {
             do {
                 try await paceNextAudioFrame()
                 try await connection.send(.data(frame))
-                lastAudioSendNanoseconds = await scheduler.nowNanoseconds()
+                let sentAt = await scheduler.nowNanoseconds()
+                guard generation == connectionGeneration,
+                      state == .live,
+                      self.connection != nil
+                else {
+                    continue
+                }
+                lastAudioSendNanoseconds = sentAt
                 return
             } catch is CancellationError {
                 throw TencentLiveTranscriberError.connectionFailed
@@ -513,48 +595,68 @@ private extension TencentLiveTranscriber {
     }
 
     func completeImmediately() async {
+        guard !streamTerminated else { return }
         finishRequested = true
         reconnectTask?.cancel()
         reconnectTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         let connection = self.connection
+        let authenticatingConnection = self.authenticatingConnection
         self.connection = nil
+        self.authenticatingConnection = nil
         configuration = nil
         pendingPCM.removeAll(keepingCapacity: false)
         state = .finished
-        eventContinuation.finish()
+        terminateEventStream()
         await connection?.cancel()
+        await authenticatingConnection?.cancel()
     }
 
     func completeSuccessfully() async {
-        guard state != .finished else { return }
+        guard state == .live, !streamTerminated else { return }
         finishRequested = true
         reconnectTask?.cancel()
         reconnectTask = nil
         receiveTask = nil
         let connection = self.connection
+        let authenticatingConnection = self.authenticatingConnection
         self.connection = nil
+        self.authenticatingConnection = nil
         configuration = nil
         pendingPCM.removeAll(keepingCapacity: false)
         state = .finished
-        eventContinuation.finish()
+        terminateEventStream()
         await connection?.cancel()
+        await authenticatingConnection?.cancel()
     }
 
     func fail(with error: Error) async {
-        guard state != .failed, state != .finished else { return }
+        guard !streamTerminated else { return }
         reconnectTask?.cancel()
         reconnectTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         let connection = self.connection
+        let authenticatingConnection = self.authenticatingConnection
         self.connection = nil
+        self.authenticatingConnection = nil
         configuration = nil
         pendingPCM.removeAll(keepingCapacity: false)
         state = .failed
-        eventContinuation.finish(throwing: error)
+        terminateEventStream(throwing: error)
         await connection?.cancel()
+        await authenticatingConnection?.cancel()
+    }
+
+    func terminateEventStream(throwing error: Error? = nil) {
+        guard !streamTerminated else { return }
+        streamTerminated = true
+        if let error {
+            eventContinuation.finish(throwing: error)
+        } else {
+            eventContinuation.finish()
+        }
     }
 
     func errorForCurrentState() -> TencentLiveTranscriberError {
