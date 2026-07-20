@@ -26,4 +26,17 @@ struct PCMChunkBufferTests {
         #expect(buffer.pop() == Data([1]))
         #expect(buffer.pop() == nil)
     }
+
+    @Test("原子清空并结束后不重新接收残留回调数据")
+    func discardsAndFinishesAtomically() {
+        let buffer = PCMChunkBuffer(capacity: 2)
+        #expect(buffer.push(Data([1])) == 0)
+
+        buffer.discardAndFinish()
+
+        #expect(buffer.push(Data([2])) == 1)
+        #expect(buffer.pop() == nil)
+        #expect(buffer.discardedCount == 1)
+        #expect(buffer.isFinishedAndEmpty)
+    }
 }

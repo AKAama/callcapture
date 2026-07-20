@@ -8,6 +8,7 @@ import Observation
 /// The synchronous PCM sink runs on Core Audio's real-time callback thread.
 @MainActor
 protocol LiveAudioCapturing: AnyObject {
+    var hasPendingCaptureResources: Bool { get }
     func startLiveCapture(
         processObjectID: AudioObjectID,
         onPCM: @escaping @Sendable (Data) -> Void
@@ -106,6 +107,58 @@ enum LiveMeetingCoordinatorError: LocalizedError, Equatable {
     }
 }
 
+private enum LiveCaptureStartOutcome: Sendable {
+    case success
+    case failure
+}
+
+private enum PCMTerminationPolicy: Sendable {
+    case drain
+    case discard
+}
+
+private enum TranscriberTerminationPolicy: Sendable, Equatable {
+    case finish
+    case cancel
+}
+
+private struct LiveMeetingTeardownOutcome: Sendable {
+    let captureCleanupFailed: Bool
+}
+
+private struct LiveMeetingTeardownOperation {
+    let id: UUID
+    let transcriberPolicy: TranscriberTerminationPolicy
+    let task: Task<LiveMeetingTeardownOutcome, Never>
+}
+
+@MainActor
+private final class LiveMeetingSession {
+    let generation: Int
+    let process: AudioProcessInfo
+    let buffer: PCMChunkBuffer
+    let transcriber: any LiveTranscriber
+
+    var captureStartTask: Task<LiveCaptureStartOutcome, Never>?
+    var senderTask: Task<Void, Never>?
+    var eventTask: Task<Void, Never>?
+    var connectionStateTask: Task<Void, Never>?
+    var teardownOperation: LiveMeetingTeardownOperation?
+    var pipelineFailed = false
+
+    init(
+        generation: Int,
+        process: AudioProcessInfo,
+        bufferCapacity: Int,
+        transcriber: any LiveTranscriber
+    ) {
+        self.generation = generation
+        self.process = process
+        buffer = PCMChunkBuffer(capacity: bufferCapacity)
+        self.transcriber = transcriber
+    }
+}
+
 /// Coordinates one memory-only live meeting from process audio to transcript.
 ///
 /// Capture, PCM sending, and transcript consumption stay separate. The Core
@@ -118,7 +171,9 @@ final class LiveMeetingCoordinator {
     private(set) var state: LiveConnectionState = .idle
     private(set) var lastError: String?
 
-    var droppedChunkCount: Int { pcmBuffer.discardedCount }
+    var droppedChunkCount: Int {
+        activeSession?.buffer.discardedCount ?? 0
+    }
 
     @ObservationIgnored
     private let capture: any LiveAudioCapturing
@@ -131,28 +186,12 @@ final class LiveMeetingCoordinator {
     @ObservationIgnored
     private let processObserver: any LiveMeetingProcessObserving
     @ObservationIgnored
-    private let pcmBuffer: PCMChunkBuffer
+    private let bufferCapacity: Int
 
-    @ObservationIgnored
-    private var transcriber: (any LiveTranscriber)?
-    @ObservationIgnored
-    private var senderTask: Task<Void, Never>?
-    @ObservationIgnored
-    private var eventTask: Task<Void, Never>?
-    @ObservationIgnored
-    private var connectionStateTask: Task<Void, Never>?
-    @ObservationIgnored
-    private var selectedProcess: AudioProcessInfo?
     @ObservationIgnored
     private var sessionGeneration = 0
     @ObservationIgnored
-    private var activeGeneration: Int?
-    @ObservationIgnored
-    private var captureStarted = false
-    @ObservationIgnored
-    private var isEnding = false
-    @ObservationIgnored
-    private var pipelineFailed = false
+    private var activeSession: LiveMeetingSession?
 
     init(
         capture: any LiveAudioCapturing,
@@ -167,91 +206,102 @@ final class LiveMeetingCoordinator {
         self.transcriberFactory = transcriberFactory
         self.configurationProvider = configurationProvider
         self.processObserver = processObserver ?? SystemLiveMeetingProcessObserver()
-        pcmBuffer = PCMChunkBuffer(capacity: bufferCapacity)
+        self.bufferCapacity = bufferCapacity
     }
 
     /// Starts a fresh, memory-only meeting for the exact Core Audio process.
     func start(process: AudioProcessInfo) async {
         await clearAndClose()
-        guard !captureStarted else { return }
+        guard activeSession == nil else { return }
+        guard !capture.hasPendingCaptureResources else {
+            lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
+            transition(to: .error)
+            return
+        }
 
         sessionGeneration += 1
-        let generation = sessionGeneration
-        activeGeneration = generation
-        selectedProcess = process
-        pipelineFailed = false
+        let session = LiveMeetingSession(
+            generation: sessionGeneration,
+            process: process,
+            bufferCapacity: bufferCapacity,
+            transcriber: transcriberFactory()
+        )
+        activeSession = session
         lastError = nil
-        pcmBuffer.clear()
         transcriptStore.clear()
         transition(to: .connecting)
 
-        let transcriber = transcriberFactory()
-        self.transcriber = transcriber
-
         do {
-            try await transcriber.connect(configuration: configurationProvider())
-        } catch {
-            guard isCurrent(generation), state == .connecting else {
-                await transcriber.cancel()
-                return
-            }
-            await failStart(
-                generation: generation,
-                transcriber: transcriber,
-                error: .transcriptionFailed
-            )
-            return
-        }
-
-        guard isCurrent(generation), state == .connecting else {
-            await transcriber.cancel()
-            return
-        }
-
-        startEventTask(transcriber: transcriber, generation: generation)
-        startSenderTask(transcriber: transcriber, generation: generation)
-
-        do {
-            let buffer = pcmBuffer
-            try await capture.startLiveCapture(
-                processObjectID: process.id,
-                onPCM: { pcm in
-                    _ = buffer.push(pcm)
-                }
+            try await session.transcriber.connect(
+                configuration: configurationProvider()
             )
         } catch {
-            guard isCurrent(generation), state == .connecting else {
-                await transcriber.cancel()
+            guard isActive(session) else {
+                await session.transcriber.cancel()
                 return
             }
-            await failStart(
-                generation: generation,
-                transcriber: transcriber,
-                error: .captureStartFailed
-            )
+            await failStart(session: session, error: .transcriptionFailed)
             return
         }
 
-        guard isCurrent(generation), state == .connecting else {
-            captureStarted = true
+        guard isActive(session), session.teardownOperation == nil else {
+            await session.transcriber.cancel()
+            return
+        }
+
+        startEventTask(for: session)
+        startSenderTask(for: session)
+
+        let buffer = session.buffer
+        let capture = self.capture
+        let captureStartTask = Task { @MainActor in
             do {
-                try await capture.stopCapture()
-                captureStarted = false
+                try await capture.startLiveCapture(
+                    processObjectID: process.id,
+                    onPCM: { pcm in
+                        _ = buffer.push(pcm)
+                    }
+                )
+                return LiveCaptureStartOutcome.success
             } catch {
-                pcmBuffer.finish()
-                lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
-                transition(to: .error)
+                return LiveCaptureStartOutcome.failure
             }
+        }
+        session.captureStartTask = captureStartTask
+
+        switch await captureStartTask.value {
+        case .failure:
+            guard isActive(session) else {
+                _ = await teardown(
+                    session,
+                    pcmPolicy: .discard,
+                    transcriberPolicy: .cancel
+                )
+                return
+            }
+            await failStart(session: session, error: .captureStartFailed)
             return
+
+        case .success:
+            guard isActive(session),
+                  session.teardownOperation == nil,
+                  state == .connecting
+            else {
+                _ = await teardown(
+                    session,
+                    pcmPolicy: .discard,
+                    transcriberPolicy: .cancel
+                )
+                return
+            }
         }
 
-        captureStarted = true
         processObserver.observeExit(of: process.pid) { [weak self] in
             guard let self else { return }
             Task { await self.processDidExit(pid: process.pid) }
         }
         transition(to: .live)
-        startConnectionStateTask(transcriber: transcriber, generation: generation)
+        startConnectionStateTask(for: session)
     }
 
     /// Gracefully stops capture, drains accepted PCM, then finishes ASR.
@@ -262,54 +312,45 @@ final class LiveMeetingCoordinator {
         await endActiveSession(finalState: .review, error: nil)
     }
 
-    /// Testable entry point shared by the AppKit process observer.
+    /// Testable entry point shared by the process observer.
     func processDidExit(pid: pid_t) async {
-        guard selectedProcess?.pid == pid else { return }
+        guard activeSession?.process.pid == pid else { return }
         await stop()
     }
 
     /// Stops any live work, cancels provider resources, and clears all content.
     func clearAndClose() async {
-        if state == .connecting || state == .live || state == .reconnecting {
-            await endActiveSession(finalState: .review, error: nil)
+        guard let session = activeSession else {
+            transcriptStore.clear()
+            if capture.hasPendingCaptureResources {
+                lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
+                transition(to: .error)
+            } else {
+                lastError = nil
+                transition(to: .idle)
+            }
+            return
         }
 
         processObserver.stopObserving()
-        invalidateActiveSession()
-        senderTask?.cancel()
-        eventTask?.cancel()
-        connectionStateTask?.cancel()
-        let senderTask = self.senderTask
-        let transcriber = self.transcriber
-        self.senderTask = nil
-        self.eventTask = nil
-        self.connectionStateTask = nil
-        self.transcriber = nil
-        await transcriber?.cancel()
-        await senderTask?.value
-
-        if captureStarted {
-            do {
-                try await capture.stopCapture()
-                captureStarted = false
-            } catch {
-                lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
-            }
-        }
-        pcmBuffer.finish()
-        pcmBuffer.clear()
-        if captureStarted {
-            // A HAL callback may still be registered after a cleanup failure.
-            // Keep the queue closed so it cannot retain any new audio.
-            pcmBuffer.finish()
-        }
+        session.buffer.discardAndFinish()
+        session.eventTask?.cancel()
+        session.connectionStateTask?.cancel()
         transcriptStore.clear()
-        selectedProcess = nil
-        isEnding = false
-        pipelineFailed = false
-        if captureStarted {
+
+        let outcome = await teardown(
+            session,
+            pcmPolicy: .discard,
+            transcriberPolicy: .cancel
+        )
+
+        guard isActive(session) else { return }
+        transcriptStore.clear()
+        if outcome.captureCleanupFailed || capture.hasPendingCaptureResources {
+            lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
             transition(to: .error)
         } else {
+            activeSession = nil
             lastError = nil
             transition(to: .idle)
         }
@@ -319,28 +360,28 @@ final class LiveMeetingCoordinator {
     /// this method returns; asynchronous socket cancellation is best-effort.
     func shutdown() {
         processObserver.stopObserving()
-        invalidateActiveSession()
-        capture.emergencyStop()
-        captureStarted = false
-        pcmBuffer.finish()
-        senderTask?.cancel()
-        eventTask?.cancel()
-        connectionStateTask?.cancel()
-        senderTask = nil
-        eventTask = nil
-        connectionStateTask = nil
-        let transcriber = self.transcriber
-        self.transcriber = nil
-        pcmBuffer.clear()
-        pcmBuffer.finish()
-        transcriptStore.clear()
-        selectedProcess = nil
-        isEnding = false
-        pipelineFailed = false
-        lastError = nil
-        transition(to: .idle)
+        let session = activeSession
+        session?.buffer.discardAndFinish()
+        session?.senderTask?.cancel()
+        session?.eventTask?.cancel()
+        session?.connectionStateTask?.cancel()
+        session?.captureStartTask?.cancel()
+        session?.teardownOperation?.task.cancel()
 
-        if let transcriber {
+        capture.emergencyStop()
+        let cleanupStillPending = capture.hasPendingCaptureResources
+        activeSession = nil
+        sessionGeneration += 1
+        transcriptStore.clear()
+        if cleanupStillPending {
+            lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
+            transition(to: .error)
+        } else {
+            lastError = nil
+            transition(to: .idle)
+        }
+
+        if let transcriber = session?.transcriber {
             Task { await transcriber.cancel() }
         }
     }
@@ -348,19 +389,17 @@ final class LiveMeetingCoordinator {
 
 @available(macOS 14.2, *)
 private extension LiveMeetingCoordinator {
-    func startConnectionStateTask(
-        transcriber: any LiveTranscriber,
-        generation: Int
-    ) {
-        guard let reporter = transcriber as? any LiveTranscriberConnectionStateReporting else {
-            return
-        }
+    func startConnectionStateTask(for session: LiveMeetingSession) {
+        guard let reporter = session.transcriber
+                as? any LiveTranscriberConnectionStateReporting
+        else { return }
 
-        connectionStateTask = Task { [weak self] in
+        session.connectionStateTask = Task { [weak self, weak session] in
             for await providerState in reporter.connectionStateUpdates() {
                 guard !Task.isCancelled,
                       let self,
-                      self.isCurrent(generation)
+                      let session,
+                      self.isActive(session)
                 else { return }
 
                 switch providerState {
@@ -379,12 +418,11 @@ private extension LiveMeetingCoordinator {
         }
     }
 
-    func startSenderTask(
-        transcriber: any LiveTranscriber,
-        generation: Int
-    ) {
-        let buffer = pcmBuffer
-        senderTask = Task { [weak self] in
+    func startSenderTask(for session: LiveMeetingSession) {
+        let buffer = session.buffer
+        let transcriber = session.transcriber
+        let generation = session.generation
+        session.senderTask = Task { [weak self] in
             while !Task.isCancelled {
                 if let pcm = buffer.pop() {
                     do {
@@ -404,40 +442,45 @@ private extension LiveMeetingCoordinator {
         }
     }
 
-    func startEventTask(
-        transcriber: any LiveTranscriber,
-        generation: Int
-    ) {
-        eventTask = Task { [weak self] in
+    func startEventTask(for session: LiveMeetingSession) {
+        let transcriber = session.transcriber
+        session.eventTask = Task { [weak self, weak session] in
             do {
                 for try await event in transcriber.events() {
                     guard !Task.isCancelled,
                           let self,
-                          self.isCurrent(generation)
+                          let session,
+                          self.isActive(session)
                     else { return }
                     self.transcriptStore.apply(event)
                 }
 
                 guard !Task.isCancelled,
                       let self,
-                      self.isCurrent(generation),
-                      !self.isEnding,
+                      let session,
+                      self.isActive(session),
+                      session.teardownOperation == nil,
                       self.state != .review,
                       self.state != .error
                 else { return }
-                await self.pipelineDidFail(generation: generation)
+                await self.pipelineDidFail(generation: session.generation)
             } catch {
-                guard !Task.isCancelled else { return }
-                await self?.pipelineDidFail(generation: generation)
+                guard !Task.isCancelled,
+                      let self,
+                      let session,
+                      self.isActive(session)
+                else { return }
+                await self.pipelineDidFail(generation: session.generation)
             }
         }
     }
 
     func pipelineDidFail(generation: Int) async {
-        guard isCurrent(generation) else { return }
-        pipelineFailed = true
+        guard let session = activeSession,
+              session.generation == generation
+        else { return }
+        session.pipelineFailed = true
         lastError = LiveMeetingCoordinatorError.transcriptionFailed.localizedDescription
-        guard !isEnding else { return }
         await endActiveSession(
             finalState: .error,
             error: .transcriptionFailed
@@ -448,33 +491,27 @@ private extension LiveMeetingCoordinator {
         finalState: LiveConnectionState,
         error: LiveMeetingCoordinatorError?
     ) async {
-        guard activeGeneration != nil, !isEnding else { return }
-        isEnding = true
+        guard let session = activeSession else { return }
         processObserver.stopObserving()
 
-        var terminalError = error
-        if captureStarted {
-            do {
-                try await capture.stopCapture()
-                captureStarted = false
-            } catch {
-                terminalError = .captureStopFailed
-            }
-        }
+        let outcome = await teardown(
+            session,
+            pcmPolicy: .drain,
+            transcriberPolicy: .finish
+        )
+        guard isActive(session) else { return }
 
-        // No producer remains after capture stops. Finishing the queue lets the
-        // sender drain every accepted chunk and then exit deterministically.
-        pcmBuffer.finish()
-        await senderTask?.value
-        senderTask = nil
-
-        connectionStateTask?.cancel()
-        connectionStateTask = nil
-        await transcriber?.finish()
-
-        if pipelineFailed, terminalError == nil {
+        let terminalError: LiveMeetingCoordinatorError?
+        if outcome.captureCleanupFailed || capture.hasPendingCaptureResources {
+            terminalError = .captureStopFailed
+        } else if let error {
+            terminalError = error
+        } else if session.pipelineFailed {
             terminalError = .transcriptionFailed
+        } else {
+            terminalError = nil
         }
+
         if let terminalError {
             lastError = terminalError.localizedDescription
             transition(to: .error)
@@ -482,39 +519,117 @@ private extension LiveMeetingCoordinator {
             lastError = nil
             transition(to: finalState)
         }
-        isEnding = false
     }
 
     func failStart(
-        generation: Int,
-        transcriber: any LiveTranscriber,
+        session: LiveMeetingSession,
         error: LiveMeetingCoordinatorError
     ) async {
-        guard isCurrent(generation) else {
-            await transcriber.cancel()
+        guard isActive(session) else {
+            await session.transcriber.cancel()
             return
         }
 
         processObserver.stopObserving()
-        if captureStarted {
-            try? await capture.stopCapture()
-            captureStarted = false
+        session.buffer.discardAndFinish()
+        session.eventTask?.cancel()
+        session.connectionStateTask?.cancel()
+        let outcome = await teardown(
+            session,
+            pcmPolicy: .discard,
+            transcriberPolicy: .cancel
+        )
+        guard isActive(session) else { return }
+
+        if outcome.captureCleanupFailed || capture.hasPendingCaptureResources {
+            lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
+        } else {
+            activeSession = nil
+            lastError = error.localizedDescription
         }
-        pcmBuffer.finish()
-        await senderTask?.value
-        senderTask?.cancel()
-        eventTask?.cancel()
-        connectionStateTask?.cancel()
-        senderTask = nil
-        eventTask = nil
-        connectionStateTask = nil
-        await transcriber.cancel()
-        self.transcriber = nil
-        selectedProcess = nil
-        activeGeneration = nil
-        pipelineFailed = true
-        lastError = error.localizedDescription
         transition(to: .error)
+    }
+
+    func teardown(
+        _ session: LiveMeetingSession,
+        pcmPolicy: PCMTerminationPolicy,
+        transcriberPolicy: TranscriberTerminationPolicy
+    ) async -> LiveMeetingTeardownOutcome {
+        if pcmPolicy == .discard {
+            session.buffer.discardAndFinish()
+        }
+
+        if let operation = session.teardownOperation {
+            let outcome = await operation.task.value
+            if transcriberPolicy == .cancel,
+               operation.transcriberPolicy != .cancel {
+                session.eventTask?.cancel()
+                await session.transcriber.cancel()
+            }
+            clearTeardownOperation(operation.id, from: session)
+            return outcome
+        }
+
+        let operationID = UUID()
+        let capture = self.capture
+        let task = Task { @MainActor in
+            if let captureStartTask = session.captureStartTask {
+                _ = await captureStartTask.value
+            }
+
+            var cleanupFailed = false
+            if capture.hasPendingCaptureResources {
+                do {
+                    try await capture.stopCapture()
+                } catch {
+                    cleanupFailed = true
+                }
+            }
+            if capture.hasPendingCaptureResources {
+                cleanupFailed = true
+            }
+
+            switch pcmPolicy {
+            case .drain:
+                session.buffer.finish()
+            case .discard:
+                session.buffer.discardAndFinish()
+            }
+            await session.senderTask?.value
+            session.senderTask = nil
+            session.connectionStateTask?.cancel()
+            session.connectionStateTask = nil
+
+            switch transcriberPolicy {
+            case .finish:
+                await session.transcriber.finish()
+            case .cancel:
+                session.eventTask?.cancel()
+                session.eventTask = nil
+                await session.transcriber.cancel()
+            }
+
+            return LiveMeetingTeardownOutcome(
+                captureCleanupFailed: cleanupFailed
+            )
+        }
+        let operation = LiveMeetingTeardownOperation(
+            id: operationID,
+            transcriberPolicy: transcriberPolicy,
+            task: task
+        )
+        session.teardownOperation = operation
+        let outcome = await task.value
+        clearTeardownOperation(operationID, from: session)
+        return outcome
+    }
+
+    func clearTeardownOperation(
+        _ operationID: UUID,
+        from session: LiveMeetingSession
+    ) {
+        guard session.teardownOperation?.id == operationID else { return }
+        session.teardownOperation = nil
     }
 
     func transition(to newState: LiveConnectionState) {
@@ -522,12 +637,7 @@ private extension LiveMeetingCoordinator {
         transcriptStore.connectionState = newState
     }
 
-    func isCurrent(_ generation: Int) -> Bool {
-        activeGeneration == generation
-    }
-
-    func invalidateActiveSession() {
-        sessionGeneration += 1
-        activeGeneration = nil
+    func isActive(_ session: LiveMeetingSession) -> Bool {
+        activeSession === session
     }
 }

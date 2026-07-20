@@ -103,3 +103,42 @@ The permanent Swift Testing suite must be run under a matching Xcode/Swift
 toolchain that supplies the `Testing` module. Real Core Audio permission/device
 behavior and a credentialed Tencent session remain end-to-end validation work;
 this task intentionally uses no real credentials or network access.
+
+## Review Fix Wave
+
+- Replaced coordinator-wide mutable task/transcriber state with a captured
+  `LiveMeetingSession` per generation. Each session owns one joinable teardown
+  operation, so overlapping `stop`, `clearAndClose`, and `start` calls await the
+  same cleanup instead of starting a new capture while an old stop is pending.
+- Guarded all post-await transcript and lifecycle state changes by exact session
+  identity. A completed teardown may only mutate its captured session; it
+  cannot clear or transition a newer active meeting.
+- Added `AudioCaptureManager.hasPendingCaptureResources`, which includes a
+  retained HAL `ioProcID` even when `isRecording` is false. Failed starts now
+  attempt cleanup immediately, retain the cleanup obligation after a failed
+  cleanup, remain in `error`, and allow a later clear to retry safely.
+- Added `PCMChunkBuffer.discardAndFinish()` to atomically discard queued PCM and
+  permanently reject subsequent callback writes. Both clear and synchronous
+  shutdown close the queue before touching HAL resources, so residual callbacks
+  cannot retain meeting audio.
+- Added four coordinator race/failure tests and one atomic-buffer test. The
+  exact permanent counts are 15 `LiveMeetingCoordinatorTests` and 3
+  `PCMChunkBufferTests`.
+
+## Review Fix Verification
+
+- Production `swift build` completed successfully after the lifecycle rewrite:
+  `Build complete! (7.39s)`.
+- The focused command
+  `swift test --filter 'LiveMeetingCoordinatorTests|PCMChunkBufferTests'` reached
+  test-target compilation but could not execute because this host toolchain has
+  no `Testing` module; the exact blocking diagnostic remains
+  `error: no such module 'Testing'`.
+- Both changed test files passed Swift frontend syntax parsing. A direct count
+  reported exactly 15 coordinator tests and 3 buffer tests.
+- The strict-concurrency deterministic runtime smoke compiled with
+  `-strict-concurrency=complete -warn-concurrency` and exercised delayed
+  teardown joining, old/new-session isolation, retained-resource cleanup retry,
+  atomic callback rejection, plus the original lifecycle scenarios. It exited
+  `0` with the exact output `task7-smoke-pass`.
+- `git diff --check` exited `0` with no output.

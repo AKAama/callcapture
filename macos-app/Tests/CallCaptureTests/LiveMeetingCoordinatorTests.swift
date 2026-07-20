@@ -192,6 +192,140 @@ struct LiveMeetingCoordinatorTests {
         harness.coordinator.shutdown()
     }
 
+    @Test("clear 与新 start 会共同等待延迟清理且旧会话不能清除新会话")
+    @MainActor func clearAndStartJoinDelayedTeardown() async {
+        let capture = FakeLiveCapture()
+        let store = LiveTranscriptStore()
+        let first = FakeLiveTranscriber()
+        let second = FakeLiveTranscriber()
+        var transcribers = [first, second]
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcribers.removeFirst() },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        capture.delayNextStop()
+
+        let clearTask = Task { await coordinator.clearAndClose() }
+        await waitUntil { capture.hasBlockedStop }
+        capture.emit(Data([7]))
+        #expect(coordinator.droppedChunkCount == 1)
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await Task.yield()
+        #expect(capture.startedProcessIDs == [Self.process.id])
+        #expect(await second.connectCount == 0)
+
+        capture.resumeStop()
+        await clearTask.value
+        await startTask.value
+
+        #expect(capture.startedProcessIDs == [Self.process.id, Self.process.id])
+        #expect(await first.sentPCM.isEmpty)
+        #expect(await second.connectCount == 1)
+        #expect(coordinator.state == .live)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("新 start 会等待已开始的延迟 stop 完整结束")
+    @MainActor func startJoinsExistingDelayedStop() async {
+        let capture = FakeLiveCapture()
+        let store = LiveTranscriptStore()
+        let first = FakeLiveTranscriber()
+        let second = FakeLiveTranscriber()
+        var transcribers = [first, second]
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcribers.removeFirst() },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        capture.delayNextStop()
+
+        let stopTask = Task { await coordinator.stop() }
+        await waitUntil { capture.hasBlockedStop }
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await Task.yield()
+
+        #expect(capture.startedProcessIDs == [Self.process.id])
+        #expect(await second.connectCount == 0)
+
+        capture.resumeStop()
+        await stopTask.value
+        await startTask.value
+
+        #expect(capture.startedProcessIDs == [Self.process.id, Self.process.id])
+        #expect(coordinator.state == .live)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("启动失败保留 HAL 资源时立即清理，失败后由 clear 重试且不误报 idle")
+    @MainActor func retriesRetainedCleanupAfterFailedStart() async {
+        let capture = FakeLiveCapture(
+            stopFailures: 1,
+            startFailures: 1,
+            retainsResourcesOnStartFailure: true
+        )
+        let transcriber = FakeLiveTranscriber()
+        let store = LiveTranscriptStore()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        await coordinator.start(process: Self.process)
+
+        #expect(coordinator.state == .error)
+        #expect(capture.hasPendingCaptureResources)
+        #expect(capture.stopCount == 1)
+        capture.emit(Data([8]))
+        #expect(coordinator.droppedChunkCount == 1)
+
+        await coordinator.clearAndClose()
+
+        #expect(!capture.hasPendingCaptureResources)
+        #expect(capture.stopCount == 2)
+        #expect(coordinator.state == .idle)
+        #expect(store.confirmedUtterances.isEmpty)
+    }
+
+    @Test("shutdown 在 HAL 清理前原子关闭队列并丢弃残留回调")
+    @MainActor func shutdownDiscardsResidualCallback() async {
+        let capture = FakeLiveCapture()
+        let transcriber = FakeLiveTranscriber()
+        let store = LiveTranscriptStore()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        var discardedDuringEmergency: Int?
+        capture.emergencyPCM = Data([6])
+        capture.onEmergencyEmission = {
+            discardedDuringEmergency = coordinator.droppedChunkCount
+        }
+
+        coordinator.shutdown()
+
+        #expect(discardedDuringEmergency == 1)
+        #expect(!capture.hasPendingCaptureResources)
+        #expect(coordinator.state == .idle)
+        #expect(store.confirmedUtterances.isEmpty)
+        await waitUntil { await transcriber.cancelCount == 1 }
+        #expect(await transcriber.sentPCM.isEmpty)
+    }
+
     @Test("应用退出同步停止采集并清空所有会议内存")
     @MainActor func shutdownClearsEverything() async {
         let harness = Harness()
@@ -308,13 +442,24 @@ private final class FakeLiveCapture: LiveAudioCapturing {
     private(set) var stopCount = 0
     private(set) var emergencyStopCount = 0
     private var stopFailures: Int
+    private var startFailures: Int
+    private let retainsResourcesOnStartFailure: Bool
+    private var delayStop = false
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+    private(set) var hasPendingCaptureResources = false
+    var emergencyPCM: Data?
+    var onEmergencyEmission: (() -> Void)?
 
     init(
         recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder(),
-        stopFailures: Int = 0
+        stopFailures: Int = 0,
+        startFailures: Int = 0,
+        retainsResourcesOnStartFailure: Bool = false
     ) {
         self.recorder = recorder
         self.stopFailures = stopFailures
+        self.startFailures = startFailures
+        self.retainsResourcesOnStartFailure = retainsResourcesOnStartFailure
     }
 
     func startLiveCapture(
@@ -323,26 +468,59 @@ private final class FakeLiveCapture: LiveAudioCapturing {
     ) async throws {
         startedProcessIDs.append(processObjectID)
         sink = onPCM
+        hasPendingCaptureResources = true
         await recorder.append("capture.start")
+        if startFailures > 0 {
+            startFailures -= 1
+            if !retainsResourcesOnStartFailure {
+                hasPendingCaptureResources = false
+                sink = nil
+            }
+            throw FakeCoordinatorError.failed
+        }
     }
 
     func stopCapture() async throws {
         stopCount += 1
         await recorder.append("capture.stop")
+        if delayStop {
+            delayStop = false
+            await withCheckedContinuation { continuation in
+                stopContinuation = continuation
+            }
+        }
         if stopFailures > 0 {
             stopFailures -= 1
             throw FakeCoordinatorError.failed
         }
+        hasPendingCaptureResources = false
         sink = nil
     }
 
     func emergencyStop() {
         emergencyStopCount += 1
+        if let emergencyPCM {
+            sink?(emergencyPCM)
+            onEmergencyEmission?()
+        }
+        hasPendingCaptureResources = false
         sink = nil
     }
 
     func emit(_ data: Data) {
         sink?(data)
+    }
+
+    var hasBlockedStop: Bool { stopContinuation != nil }
+
+    func delayNextStop() {
+        delayStop = true
+    }
+
+    func resumeStop() {
+        let continuation = stopContinuation
+        stopContinuation = nil
+        continuation?.resume()
     }
 }
 

@@ -61,6 +61,16 @@ final class PCMChunkBuffer: @unchecked Sendable {
         isFinished = true
     }
 
+    /// Atomically discards queued audio and permanently closes this session's
+    /// buffer to producers. Unlike `clear()`, this never reopens the queue.
+    func discardAndFinish() {
+        lock.lock()
+        defer { lock.unlock() }
+
+        chunks.removeAll(keepingCapacity: true)
+        isFinished = true
+    }
+
     /// Discards queued chunks and resets the buffer for a future session.
     func clear() {
         lock.lock()

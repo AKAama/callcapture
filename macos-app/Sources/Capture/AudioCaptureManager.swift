@@ -19,6 +19,13 @@ final class AudioCaptureManager {
 
     private(set) var isRecording = false
 
+    /// Whether a capture callback or live recording still requires teardown.
+    /// This remains true after a failed start when HAL retained `ioProcID` so
+    /// higher-level lifecycle code can retry cleanup instead of reporting idle.
+    var hasPendingCaptureResources: Bool {
+        isRecording || ioProcID != nil
+    }
+
     private var tapID: AudioObjectID = .init(kAudioObjectUnknown)
     private var aggregateDeviceID: AudioObjectID = .init(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
