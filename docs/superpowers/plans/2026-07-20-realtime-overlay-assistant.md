@@ -18,7 +18,7 @@
 - 第一版 LLM 只支持 OpenAI-compatible 流式 Chat Completions。
 - LLM 默认只使用最近 30 秒已确认字幕；不得包含临时字幕。
 - API Key 只保存到 macOS Keychain；日志不得包含音频、字幕、Prompt、回复、密钥或签名 URL。
-- Core Audio 实时回调不得执行网络、文件 IO、锁等待或 UI 更新。
+- Core Audio 实时回调不得执行网络、文件 IO、锁等待或 UI 更新；队列正常满载时丢弃最旧块，无法立即取得写入权时允许丢弃当前块，两种情况都必须返回丢弃计数。
 
 ---
 
