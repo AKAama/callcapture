@@ -9,6 +9,8 @@ import OSLog
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.openWindow) private var openWindow
+    @State private var audioProcesses: [AudioProcessInfo] = []
+    @State private var selectedProcessPID: pid_t?
 
     private static let logger = Logger(
         subsystem: "com.callcapture.app",
@@ -45,10 +47,13 @@ struct ContentView: View {
         }
         .padding()
         .frame(width: 280)
-        .onAppear { appModel.refreshAudioDevices() }
+        .onAppear {
+            appModel.refreshAudioDevices()
+            refreshAudioProcesses()
+        }
     }
 
-    /// Output (speaker) and microphone selection, shown before recording.
+    /// Recording type, meeting app, and microphone selection before recording.
     @ViewBuilder
     private func devicePickers(appModel: AppModel) -> some View {
         @Bindable var appModel = appModel
@@ -58,11 +63,24 @@ struct ContentView: View {
                     Text(type.displayName).tag(type)
                 }
             }
-            Picker("Output", selection: $appModel.selectedOutputUID) {
-                Text("System Default").tag(String?.none)
-                ForEach(appModel.outputDevices) { device in
-                    Text(device.name).tag(String?.some(device.uid))
+            HStack {
+                if audioProcesses.isEmpty {
+                    Text("未发现可捕获应用")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Picker("Meeting App", selection: $selectedProcessPID) {
+                        Text("Select an application").tag(pid_t?.none)
+                        ForEach(audioProcesses) { process in
+                            Text(process.name).tag(pid_t?.some(process.pid))
+                        }
+                    }
                 }
+                Button(action: refreshAudioProcesses) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh capturable applications")
             }
             Picker("Mic", selection: $appModel.selectedMicUID) {
                 Text("None").tag(String?.none)
@@ -100,7 +118,7 @@ struct ContentView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(appModel.state == .recording ? .red : .accentColor)
-        .disabled(appModel.state == .transcribing)
+        .disabled(recordButtonDisabled)
     }
 
     @ViewBuilder
@@ -230,5 +248,26 @@ struct ContentView: View {
         case .transcribing: "Transcribing..."
         case .error: "Error"
         }
+    }
+
+    /// Reloads capturable apps while keeping a selection whose PID still exists.
+    private func refreshAudioProcesses() {
+        let refreshedProcesses = AudioProcessEnumerator.processes()
+        audioProcesses = refreshedProcesses
+
+        if let selectedProcessPID,
+           !refreshedProcesses.contains(where: { $0.pid == selectedProcessPID }) {
+            self.selectedProcessPID = nil
+        }
+    }
+
+    private var recordButtonDisabled: Bool {
+        if appModel.state == .transcribing {
+            return true
+        }
+        if appModel.state == .recording {
+            return false
+        }
+        return selectedProcessPID == nil
     }
 }
