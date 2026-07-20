@@ -68,7 +68,9 @@ final class AudioCaptureManager {
         outputDeviceUID: String? = nil,
         micDeviceUID: String? = nil
     ) async throws {
-        guard !isRecording else { throw CaptureError.alreadyRecording }
+        guard !isRecording, ioProcID == nil else {
+            throw CaptureError.alreadyRecording
+        }
 
         Self.logger.info(
             "startCapture: output=\(outputDeviceUID ?? "default"), mic=\(micDeviceUID ?? "none")"
@@ -222,8 +224,7 @@ final class AudioCaptureManager {
         let startStatus = AudioDeviceStart(aggregateDevice, procID)
         guard startStatus == noErr else {
             Self.logger.error("startCapture: AudioDeviceStart failed: \(startStatus)")
-            AudioDeviceDestroyIOProcID(aggregateDevice, procID)
-            self.ioProcID = nil
+            try stopIOProc()
             self.converter = nil
             self.fileWriter = nil
             try? self.micWriter?.finalize()
@@ -252,7 +253,9 @@ final class AudioCaptureManager {
         processObjectID: AudioObjectID,
         onPCM: @escaping @Sendable (Data) -> Void
     ) async throws {
-        guard !isRecording else { throw CaptureError.alreadyRecording }
+        guard !isRecording, ioProcID == nil else {
+            throw CaptureError.alreadyRecording
+        }
 
         let tapUUID = UUID()
         let tapDescription = CATapDescription(
@@ -327,32 +330,40 @@ final class AudioCaptureManager {
 
             let startStatus = AudioDeviceStart(aggregateDevice, procID)
             guard startStatus == noErr else {
-                AudioDeviceDestroyIOProcID(aggregateDevice, procID)
-                self.ioProcID = nil
                 throw CaptureError.tapCreationFailed(status: startStatus)
             }
 
             self.isRecording = true
-        } catch {
-            stopIOProc()
+        } catch let startError {
+            do {
+                try stopIOProc()
+            } catch let cleanupError {
+                // The registered callback still contains a pass-unretained
+                // pointer to this manager. Retain every dependent resource so
+                // stopCapture() or emergencyStop() can retry destruction.
+                throw cleanupError
+            }
             pcmSink = nil
             converter = nil
             targetFormat = nil
             mixFormat = nil
             destroyAggregateDevice()
             destroyTap()
-            throw error
+            throw startError
         }
     }
 
     /// Stops the current capture and finalizes any active WAV file.
     ///
     /// - Throws: `CaptureError.notRecording` if no recording is active,
+    ///   `CaptureError.ioProcCleanupFailed` if callback destruction fails,
     ///   or `CaptureError.finalizationFailed` if the file cannot be closed.
     func stopCapture() async throws {
-        guard isRecording else { throw CaptureError.notRecording }
+        guard isRecording || ioProcID != nil else {
+            throw CaptureError.notRecording
+        }
 
-        stopIOProc()
+        try stopIOProc()
 
         try? micWriter?.finalize()
         try? systemWriter?.finalize()
@@ -399,10 +410,17 @@ final class AudioCaptureManager {
     /// the audio engine, aggregate device, and process tap. Safe to call when
     /// not recording.
     func emergencyStop() {
-        guard isRecording else { return }
+        guard isRecording || ioProcID != nil else { return }
         Self.logger.warning("emergencyStop: releasing capture resources")
 
-        stopIOProc()
+        do {
+            try stopIOProc()
+        } catch {
+            Self.logger.error(
+                "emergencyStop: retaining capture resources after IO callback cleanup failure: \(error)"
+            )
+            return
+        }
 
         try? fileWriter?.finalize()
         try? micWriter?.finalize()
@@ -424,11 +442,54 @@ final class AudioCaptureManager {
 
     // MARK: - Private Helpers
 
-    /// Stops and destroys the aggregate device IO proc, if active.
-    private func stopIOProc() {
+    struct IOProcCleanupOutcome {
+        let stopStatus: OSStatus
+        let destroyStatus: OSStatus
+
+        var didDestroy: Bool { destroyStatus == noErr }
+    }
+
+    /// Runs the HAL cleanup calls in order while preserving both statuses for
+    /// the state-owning caller. Destruction is still attempted after a stop
+    /// error because an already-stopped device may report a stop failure while
+    /// allowing its registered callback to be removed safely.
+    static func performIOProcCleanup(
+        stop: () -> OSStatus,
+        destroy: () -> OSStatus
+    ) -> IOProcCleanupOutcome {
+        let stopStatus = stop()
+        let destroyStatus = destroy()
+        return IOProcCleanupOutcome(
+            stopStatus: stopStatus,
+            destroyStatus: destroyStatus
+        )
+    }
+
+    /// Stops and destroys the aggregate device IO proc, if active. The stored
+    /// handle is cleared only after HAL confirms callback destruction.
+    private func stopIOProc() throws {
         guard let procID = ioProcID else { return }
-        AudioDeviceStop(aggregateDeviceID, procID)
-        AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
+        let outcome = Self.performIOProcCleanup(
+            stop: { AudioDeviceStop(self.aggregateDeviceID, procID) },
+            destroy: {
+                AudioDeviceDestroyIOProcID(self.aggregateDeviceID, procID)
+            }
+        )
+
+        if outcome.stopStatus != noErr {
+            Self.logger.warning(
+                "AudioDeviceStop failed during cleanup: OSStatus=\(outcome.stopStatus)"
+            )
+        }
+        guard outcome.didDestroy else {
+            Self.logger.error(
+                "AudioDeviceDestroyIOProcID failed during cleanup: OSStatus=\(outcome.destroyStatus)"
+            )
+            throw CaptureError.ioProcCleanupFailed(
+                stopStatus: outcome.stopStatus,
+                destroyStatus: outcome.destroyStatus
+            )
+        }
         ioProcID = nil
     }
 
@@ -685,6 +746,12 @@ final class AudioCaptureManager {
     }
 
     private func destroyTap() {
+        guard ioProcID == nil else {
+            Self.logger.error(
+                "Refusing to destroy process tap while an IO callback remains registered"
+            )
+            return
+        }
         if tapID != kAudioObjectUnknown {
             let err = AudioHardwareDestroyProcessTap(tapID)
             if err != noErr {
@@ -695,6 +762,12 @@ final class AudioCaptureManager {
     }
 
     private func destroyAggregateDevice() {
+        guard ioProcID == nil else {
+            Self.logger.error(
+                "Refusing to destroy aggregate device while an IO callback remains registered"
+            )
+            return
+        }
         if aggregateDeviceID != kAudioObjectUnknown {
             let err = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             if err != noErr {
