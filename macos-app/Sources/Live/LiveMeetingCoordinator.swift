@@ -132,6 +132,12 @@ private struct LiveMeetingTeardownOperation {
     let task: Task<LiveMeetingTeardownOutcome, Never>
 }
 
+private enum LiveMeetingSessionIntent: Equatable, Sendable {
+    case startup
+    case running
+    case terminal(LiveConnectionState)
+}
+
 @MainActor
 private final class LiveMeetingSession {
     let generation: Int
@@ -145,6 +151,15 @@ private final class LiveMeetingSession {
     var connectionStateTask: Task<Void, Never>?
     var teardownOperation: LiveMeetingTeardownOperation?
     var pipelineFailed = false
+    var intent: LiveMeetingSessionIntent = .startup
+
+    var acceptsStartupCompletion: Bool {
+        intent == .startup
+    }
+
+    func requestTerminalState(_ state: LiveConnectionState) {
+        intent = .terminal(state)
+    }
 
     init(
         generation: Int,
@@ -236,18 +251,12 @@ final class LiveMeetingCoordinator {
                 configuration: configurationProvider()
             )
         } catch {
-            guard isActive(session) else {
-                await session.transcriber.cancel()
-                return
-            }
+            guard isActive(session), session.acceptsStartupCompletion else { return }
             await failStart(session: session, error: .transcriptionFailed)
             return
         }
 
-        guard isActive(session), session.teardownOperation == nil else {
-            await session.transcriber.cancel()
-            return
-        }
+        guard isActive(session), session.acceptsStartupCompletion else { return }
 
         startEventTask(for: session)
         startSenderTask(for: session)
@@ -271,31 +280,18 @@ final class LiveMeetingCoordinator {
 
         switch await captureStartTask.value {
         case .failure:
-            guard isActive(session) else {
-                _ = await teardown(
-                    session,
-                    pcmPolicy: .discard,
-                    transcriberPolicy: .cancel
-                )
-                return
-            }
+            guard isActive(session), session.acceptsStartupCompletion else { return }
             await failStart(session: session, error: .captureStartFailed)
             return
 
         case .success:
             guard isActive(session),
-                  session.teardownOperation == nil,
+                  session.acceptsStartupCompletion,
                   state == .connecting
-            else {
-                _ = await teardown(
-                    session,
-                    pcmPolicy: .discard,
-                    transcriberPolicy: .cancel
-                )
-                return
-            }
+            else { return }
         }
 
+        session.intent = .running
         processObserver.observeExit(of: process.pid) { [weak self] in
             guard let self else { return }
             Task { await self.processDidExit(pid: process.pid) }
@@ -333,6 +329,7 @@ final class LiveMeetingCoordinator {
         }
 
         processObserver.stopObserving()
+        session.requestTerminalState(.idle)
         session.buffer.discardAndFinish()
         session.eventTask?.cancel()
         session.connectionStateTask?.cancel()
@@ -347,9 +344,11 @@ final class LiveMeetingCoordinator {
         guard isActive(session) else { return }
         transcriptStore.clear()
         if outcome.captureCleanupFailed || capture.hasPendingCaptureResources {
+            session.requestTerminalState(.error)
             lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
             transition(to: .error)
         } else {
+            session.requestTerminalState(.idle)
             activeSession = nil
             lastError = nil
             transition(to: .idle)
@@ -361,6 +360,7 @@ final class LiveMeetingCoordinator {
     func shutdown() {
         processObserver.stopObserving()
         let session = activeSession
+        session?.requestTerminalState(.idle)
         session?.buffer.discardAndFinish()
         session?.senderTask?.cancel()
         session?.eventTask?.cancel()
@@ -428,6 +428,7 @@ private extension LiveMeetingCoordinator {
                     do {
                         try await transcriber.send(pcm)
                     } catch {
+                        if Task.isCancelled { return }
                         Task { @MainActor [weak self] in
                             await self?.pipelineDidFail(generation: generation)
                         }
@@ -479,6 +480,7 @@ private extension LiveMeetingCoordinator {
         guard let session = activeSession,
               session.generation == generation
         else { return }
+        if case .terminal = session.intent { return }
         session.pipelineFailed = true
         lastError = LiveMeetingCoordinatorError.transcriptionFailed.localizedDescription
         await endActiveSession(
@@ -492,6 +494,7 @@ private extension LiveMeetingCoordinator {
         error: LiveMeetingCoordinatorError?
     ) async {
         guard let session = activeSession else { return }
+        session.requestTerminalState(error == nil ? finalState : .error)
         processObserver.stopObserving()
 
         let outcome = await teardown(
@@ -513,9 +516,11 @@ private extension LiveMeetingCoordinator {
         }
 
         if let terminalError {
+            session.requestTerminalState(.error)
             lastError = terminalError.localizedDescription
             transition(to: .error)
         } else {
+            session.requestTerminalState(finalState)
             lastError = nil
             transition(to: finalState)
         }
@@ -525,11 +530,9 @@ private extension LiveMeetingCoordinator {
         session: LiveMeetingSession,
         error: LiveMeetingCoordinatorError
     ) async {
-        guard isActive(session) else {
-            await session.transcriber.cancel()
-            return
-        }
+        guard isActive(session), session.acceptsStartupCompletion else { return }
 
+        session.requestTerminalState(.error)
         processObserver.stopObserving()
         session.buffer.discardAndFinish()
         session.eventTask?.cancel()
@@ -557,6 +560,7 @@ private extension LiveMeetingCoordinator {
     ) async -> LiveMeetingTeardownOutcome {
         if pcmPolicy == .discard {
             session.buffer.discardAndFinish()
+            session.senderTask?.cancel()
         }
 
         if let operation = session.teardownOperation {

@@ -326,6 +326,149 @@ struct LiveMeetingCoordinatorTests {
         #expect(await transcriber.sentPCM.isEmpty)
     }
 
+    @Test("stop 请求后延迟 ASR 连接失败不能覆盖 review 意图")
+    @MainActor func delayedConnectFailurePreservesStopIntent() async {
+        let capture = FakeLiveCapture()
+        let transcriber = FakeLiveTranscriber()
+        await transcriber.delayNextConnect()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { await transcriber.hasBlockedConnect }
+        await coordinator.stop()
+        #expect(coordinator.state == .review)
+
+        await transcriber.failConnect()
+        await startTask.value
+
+        #expect(coordinator.state == .review)
+        #expect(coordinator.lastError == nil)
+        #expect(capture.startedProcessIDs.isEmpty)
+        #expect(await transcriber.cancelCount == 0)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("clear 请求后延迟 ASR 连接失败不能重复取消或覆盖 idle")
+    @MainActor func delayedConnectFailurePreservesClearIntent() async {
+        let transcriber = FakeLiveTranscriber()
+        await transcriber.delayNextConnect()
+        let coordinator = LiveMeetingCoordinator(
+            capture: FakeLiveCapture(),
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { await transcriber.hasBlockedConnect }
+        await coordinator.clearAndClose()
+        #expect(coordinator.state == .idle)
+        #expect(await transcriber.cancelCount == 1)
+
+        await transcriber.failConnect()
+        await startTask.value
+
+        #expect(coordinator.state == .idle)
+        #expect(coordinator.lastError == nil)
+        #expect(await transcriber.cancelCount == 1)
+    }
+
+    @Test("stop 请求后延迟采集启动失败不能取消已完成的 ASR 或覆盖 review")
+    @MainActor func delayedCaptureFailurePreservesStopIntent() async {
+        let capture = FakeLiveCapture()
+        capture.delayNextStart()
+        let transcriber = FakeLiveTranscriber()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { capture.hasBlockedStart }
+        let stopTask = Task { await coordinator.stop() }
+        await Task.yield()
+        capture.failStart()
+        await startTask.value
+        await stopTask.value
+
+        #expect(coordinator.state == .review)
+        #expect(coordinator.lastError == nil)
+        #expect(capture.stopCount == 1)
+        #expect(await transcriber.finishCount == 1)
+        #expect(await transcriber.cancelCount == 0)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("clear 请求后延迟采集启动失败只能完成既有 discard 清理")
+    @MainActor func delayedCaptureFailurePreservesClearIntent() async {
+        let capture = FakeLiveCapture()
+        capture.delayNextStart()
+        let transcriber = FakeLiveTranscriber()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { capture.hasBlockedStart }
+        let clearTask = Task { await coordinator.clearAndClose() }
+        await Task.yield()
+        capture.failStart()
+        await startTask.value
+        await clearTask.value
+
+        #expect(coordinator.state == .idle)
+        #expect(coordinator.lastError == nil)
+        #expect(capture.stopCount == 1)
+        #expect(await transcriber.finishCount == 0)
+        #expect(await transcriber.cancelCount == 1)
+    }
+
+    @Test("discard 清理会取消已取出 PCM 的挂起发送并立即返回")
+    @MainActor func discardCancelsSuspendedSenderPromptly() async {
+        let capture = FakeLiveCapture()
+        let transcriber = FakeLiveTranscriber()
+        await transcriber.delaySends(byNanoseconds: 1_000_000_000)
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        capture.emit(Data([4]))
+        await waitUntil { await transcriber.sendAttemptCount == 1 }
+        let stopTask = Task { await coordinator.stop() }
+        await waitUntil { capture.stopCount == 1 }
+
+        var clearCompleted = false
+        let clearTask = Task {
+            await coordinator.clearAndClose()
+            clearCompleted = true
+        }
+        try? await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
+
+        #expect(clearCompleted)
+        await clearTask.value
+        await stopTask.value
+        #expect(await transcriber.sentPCM.isEmpty)
+        #expect(coordinator.state == .idle)
+    }
+
     @Test("应用退出同步停止采集并清空所有会议内存")
     @MainActor func shutdownClearsEverything() async {
         let harness = Harness()
@@ -446,6 +589,8 @@ private final class FakeLiveCapture: LiveAudioCapturing {
     private let retainsResourcesOnStartFailure: Bool
     private var delayStop = false
     private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var delayStart = false
+    private var startContinuation: CheckedContinuation<Void, Error>?
     private(set) var hasPendingCaptureResources = false
     var emergencyPCM: Data?
     var onEmergencyEmission: (() -> Void)?
@@ -470,6 +615,12 @@ private final class FakeLiveCapture: LiveAudioCapturing {
         sink = onPCM
         hasPendingCaptureResources = true
         await recorder.append("capture.start")
+        if delayStart {
+            delayStart = false
+            try await withCheckedThrowingContinuation { continuation in
+                startContinuation = continuation
+            }
+        }
         if startFailures > 0 {
             startFailures -= 1
             if !retainsResourcesOnStartFailure {
@@ -512,6 +663,17 @@ private final class FakeLiveCapture: LiveAudioCapturing {
     }
 
     var hasBlockedStop: Bool { stopContinuation != nil }
+    var hasBlockedStart: Bool { startContinuation != nil }
+
+    func delayNextStart() {
+        delayStart = true
+    }
+
+    func failStart() {
+        let continuation = startContinuation
+        startContinuation = nil
+        continuation?.resume(throwing: FakeCoordinatorError.failed)
+    }
 
     func delayNextStop() {
         delayStop = true
@@ -533,8 +695,13 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
 
     private(set) var connectCount = 0
     private(set) var cancelCount = 0
+    private(set) var finishCount = 0
     private(set) var sentPCM: [Data] = []
+    private(set) var sendAttemptCount = 0
     private var sendsFail = false
+    private var delayConnect = false
+    private var connectContinuation: CheckedContinuation<Void, Error>?
+    private var sendDelayNanoseconds: UInt64 = 0
 
     init(recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder()) {
         let pair = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
@@ -549,10 +716,22 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
     func connect(configuration: ASRConfiguration) async throws {
         connectCount += 1
         await recorder.append("asr.connect")
+        if delayConnect {
+            delayConnect = false
+            try await withCheckedThrowingContinuation { continuation in
+                connectContinuation = continuation
+            }
+        }
         connectionStateContinuation.yield(.live)
     }
 
     func send(_ pcm: Data) async throws {
+        sendAttemptCount += 1
+        if sendDelayNanoseconds > 0 {
+            try await Task<Never, Never>.sleep(
+                nanoseconds: sendDelayNanoseconds
+            )
+        }
         if sendsFail { throw FakeCoordinatorError.failed }
         sentPCM.append(pcm)
         await recorder.append("asr.send")
@@ -567,6 +746,7 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
     }
 
     func finish() async {
+        finishCount += 1
         await recorder.append("asr.finish")
         continuation.finish()
     }
@@ -591,6 +771,22 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
 
     func failSends() {
         sendsFail = true
+    }
+
+    var hasBlockedConnect: Bool { connectContinuation != nil }
+
+    func delayNextConnect() {
+        delayConnect = true
+    }
+
+    func failConnect() {
+        let continuation = connectContinuation
+        connectContinuation = nil
+        continuation?.resume(throwing: FakeCoordinatorError.failed)
+    }
+
+    func delaySends(byNanoseconds nanoseconds: UInt64) {
+        sendDelayNanoseconds = nanoseconds
     }
 }
 

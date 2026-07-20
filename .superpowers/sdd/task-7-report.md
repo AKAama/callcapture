@@ -142,3 +142,42 @@ this task intentionally uses no real credentials or network access.
   atomic callback rejection, plus the original lifecycle scenarios. It exited
   `0` with the exact output `task7-smoke-pass`.
 - `git diff --check` exited `0` with no output.
+
+## Final P1 Fix Wave
+
+- Added an explicit per-session lifecycle intent: `startup`, `running`, or a
+  requested terminal state. Stop, clear, shutdown, and failure teardown record
+  terminal intent before their first suspension.
+- Late ASR-connect and capture-start completions now proceed only while the
+  exact session still owns startup intent. A failure arriving after intentional
+  stop/clear returns without calling `failStart`, removing the reviewed
+  session, repeating provider cancellation, or changing `review`/`idle`.
+- A discard request now cancels the session sender before joining any teardown
+  operation, including an already-running graceful drain. Sender cancellation
+  raised from a suspended provider `send` is treated as normal teardown rather
+  than an ASR pipeline failure.
+- Added four delayed startup regressions covering ASR connect plus stop/clear
+  and capture start plus stop/clear. Added a fifth regression where the sender
+  has already popped PCM and is suspended in provider send while clear joins an
+  existing drain. The current exact counts are 20
+  `LiveMeetingCoordinatorTests` and 3 `PCMChunkBufferTests`.
+
+## Final P1 Verification Evidence
+
+- TDD red evidence: before the intent change, the strict race smoke exited
+  `133` at the late-connect/stop review assertion. After that fix, it advanced
+  to and exited `133` at the prompt discard assertion. The strengthened
+  discard-joins-drain case also exited `133` before cancellation was moved
+  ahead of the teardown join.
+- Final production `swift build` exited `0` with the exact result
+  `Build complete! (7.48s)`.
+- The final deterministic runtime smoke compiled the focused production files
+  with `-strict-concurrency=complete -warn-concurrency`, exercised all original
+  lifecycle cases plus the nine review-race/failure cases, and exited `0` with
+  the exact output `task7-smoke-pass`.
+- Both changed permanent test files pass Swift frontend syntax parsing. Direct
+  counting reports exactly 20 coordinator tests and 3 buffer tests.
+- Focused `swift test --filter 'LiveMeetingCoordinatorTests|PCMChunkBufferTests'`
+  again reached test-target compilation but could not execute because this host
+  toolchain reports `error: no such module 'Testing'`.
+- `git diff --check` exited `0` with no output.
