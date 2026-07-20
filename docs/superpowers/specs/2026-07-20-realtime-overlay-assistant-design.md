@@ -1,129 +1,102 @@
-# Real-Time Meeting Overlay Assistant Design
+# 实时会议悬浮助手设计
 
-**Date:** 2026-07-20  
-**Status:** Approved for planning
+**日期：** 2026-07-20
+**状态：** 已确认，等待制定实施计划
 
-## 1. Purpose
+## 1. 目标
 
-Build a macOS-only meeting companion that captures audio from one user-selected
-meeting application, transcribes other participants in real time, distinguishes
-remote speakers with generic labels, and displays the conversation in a native
-floating overlay. The user can manually invoke an LLM assistant using only the
-most recent 30 seconds of confirmed transcript to get ideas or a concise answer
-they can use during the meeting.
+构建一款仅支持 macOS 的会议辅助工具。它捕获用户指定会议应用的输出音频，实时转录其他参会者的发言，用通用标签区分远端说话人，并通过原生悬浮窗口展示对话。用户可以手动调用 LLM 助手，仅使用最近 30 秒的已确认字幕，获取会议中可参考的想法或可直接表达的简短回答。
 
-The first version is a real-time aid, not a meeting recorder or post-meeting
-analysis product.
+第一版只服务于会议进行中的实时辅助，不是会议录音或会后分析产品。
 
-## 2. Product Scope
+## 2. 产品范围
 
-### In scope
+### 2.1 包含范围
 
-- macOS 14.2 or later.
-- User selection of one currently running meeting application.
-- Capture only the selected application's output audio.
-- Do not capture or transcribe microphone audio.
-- Real-time Chinese and English mixed-language transcription.
-- Real-time generic speaker separation, such as `Speaker 1` and `Speaker 2`.
-- A native, frameless, always-on-top subtitle overlay.
-- Transcript held only in memory during and immediately after a meeting.
-- Copying the full in-memory transcript after capture stops.
-- Clearing all transcript and assistant content when the overlay closes or a
-  new meeting starts.
-- A manually triggered LLM assistant using the most recent 30 seconds of
-  confirmed transcript.
-- Configurable OpenAI-compatible LLM endpoints and models.
+- 支持 macOS 14.2 及以上版本。
+- 用户从当前运行的应用中选择一个会议应用。
+- 只捕获所选应用的输出音频。
+- 不捕获、不转录麦克风音频。
+- 实时转录中英文混合语音。
+- 实时区分说话人，显示为“发言人 1”“发言人 2”等通用标签。
+- 使用原生、无边框、始终置顶的字幕悬浮窗口。
+- 会议过程中以及停止捕获后，字幕只保存在内存中。
+- 停止捕获后允许复制完整的内存字幕。
+- 关闭悬浮窗口或开始新会议时，清除所有字幕和助手内容。
+- 用户手动调用 LLM 助手，并使用最近 30 秒的已确认字幕作为上下文。
+- 支持配置兼容 OpenAI API 的 LLM 服务地址和模型。
 
-### Out of scope
+### 2.2 不包含范围
 
-- Capturing or displaying the local user's microphone speech.
-- Persisting recordings, transcripts, meeting history, or LLM responses.
-- Meeting summaries, action items, sentiment, emotion, or post-processing.
-- Batch retranscription after the meeting.
-- Identifying speakers by real name or voiceprint.
-- Windows or Linux support.
-- Automatic detection of questions or automatic LLM invocation.
-- Native Anthropic, Gemini, or other non-OpenAI-compatible protocols.
+- 捕获或显示本机用户的麦克风发言。
+- 持久化录音、字幕、会议历史或 LLM 回复。
+- 生成会议总结、行动项、情感或情绪分析。
+- 会议结束后的批量重新转录。
+- 通过真实姓名或声纹识别说话人。
+- 支持 Windows 或 Linux。
+- 自动检测问题或自动调用 LLM。
+- 原生支持 Anthropic、Gemini 等非 OpenAI-compatible 协议。
 
-## 3. Recommended Foundation
+## 3. 推荐技术基础
 
-Implement the feature by adapting CallCapture rather than starting a Tauri
-application. Reuse its macOS process-audio capture, application selection,
-permissions, settings, signing, and packaging foundations. Remove or leave
-disabled the Python worker, persistent session database, batch transcription,
-recording export, and analysis UI for this product mode.
+在 CallCapture 项目上进行改造，不重新创建 Tauri 应用。复用 CallCapture 已有的 macOS 进程音频捕获、应用选择、系统权限、设置、签名和打包能力。这个产品模式不启用 Python worker、持久化会话数据库、批量转录、录音导出和分析界面。
 
-Use Swift and SwiftUI for the application and AppKit `NSPanel` for the floating
-overlay. This avoids a WebView, preserves native macOS focus behavior, and does
-not introduce Rust or cross-platform abstractions that the first version does
-not need.
+应用使用 Swift 和 SwiftUI，悬浮窗口使用 AppKit 的 `NSPanel`。该方案不依赖 WebView，能够保持原生 macOS 的焦点行为，也不引入第一版不需要的 Rust 和跨平台抽象。
 
-## 4. Architecture
+## 4. 系统架构
 
 ```text
-Selected meeting application
-        |
-        v
-Core Audio process tap
-        |
-        v
-Audio converter and bounded buffer
-(16 kHz, mono, signed PCM 16-bit)
-        |
-        v
-LiveTranscriber protocol
-        |
-        +--> TencentLiveTranscriber (initial implementation)
-        |       WebSocket + zh/en speaker-separation model
-        |
-        v
-LiveTranscriptStore (memory only)
-        |
-        +--> SubtitlePanel (NSPanel + SwiftUI)
-        |
-        +--> 30-second context selector
-                    |
-                    v
+用户选择的会议应用
+        │
+        ▼
+Core Audio 进程音频 Tap
+        │
+        ▼
+音频转换器和有界缓冲区
+（16 kHz、单声道、16-bit 有符号 PCM）
+        │
+        ▼
+LiveTranscriber 协议
+        │
+        ├── TencentLiveTranscriber（第一版实现）
+        │       WebSocket + 中英文话者分离模型
+        │
+        ▼
+LiveTranscriptStore（仅内存）
+        │
+        ├── SubtitlePanel（NSPanel + SwiftUI）
+        │
+        └── 最近 30 秒上下文选择器
+                    │
+                    ▼
               MeetingAssistant
-                    |
-                    v
-        Configurable OpenAI-compatible LLM
-                    |
-                    v
+                    │
+                    ▼
+         可配置的 OpenAI-compatible LLM
+                    │
+                    ▼
               AssistantPanel
 ```
 
-The audio capture, ASR connection, transcript state, and LLM request are
-independent components. Failure or cancellation in the LLM path must never
-interrupt audio capture or live transcription.
+音频捕获、ASR 连接、字幕状态和 LLM 请求是互相独立的组件。LLM 请求失败或取消时，不得中断音频捕获或实时转录。
 
-## 5. Components
+## 5. 核心组件
 
-### 5.1 Meeting application selection
+### 5.1 会议应用选择
 
-Present currently running applications that can be targeted by the process
-audio tap. The user must explicitly select one before starting. The selected
-process is the only audio source; notification sounds, music, and other system
-audio must not be included.
+展示当前正在运行且可作为进程音频 Tap 目标的应用。开始转录前，用户必须明确选择一个应用。只捕获所选进程的声音，不应包含通知、音乐或其他系统声音。
 
-If the process exits during capture, stop audio capture automatically and move
-the session to the ended state while retaining the transcript in memory.
+如果所选进程在捕获期间退出，应用自动停止音频捕获并进入“已结束”状态，同时将已有字幕继续保留在内存中。
 
-### 5.2 Audio capture and conversion
+### 5.2 音频捕获与转换
 
-Reuse CallCapture's Core Audio process-tap implementation. Tee captured buffers
-directly into a bounded in-memory converter and do not create WAV or temporary
-audio files.
+复用 CallCapture 的 Core Audio 进程音频 Tap 实现。捕获到的音频缓冲区直接送入内存中的有界转换器，不创建 WAV 文件或临时音频文件。
 
-The ASR stream receives 16 kHz, mono, signed 16-bit PCM. The converter must not
-perform network work on the Core Audio real-time callback. A bounded queue
-decouples capture from WebSocket transmission. If the consumer falls behind,
-report degraded service and discard the oldest unsent audio rather than grow
-memory without limit or block the audio callback.
+发送给 ASR 的数据格式为 16 kHz、单声道、16-bit 有符号 PCM。Core Audio 实时回调中不得执行网络操作。使用有界队列隔离音频捕获和 WebSocket 发送；如果发送端处理不过来，应报告服务降级并丢弃最早的未发送音频，而不能无限增加内存占用或阻塞音频回调。
 
-### 5.3 Live transcription provider
+### 5.3 实时转录 Provider
 
-Define a provider-neutral interface so the initial ASR vendor can be replaced:
+定义与厂商无关的协议，允许未来替换 ASR 服务：
 
 ```swift
 protocol LiveTranscriber {
@@ -135,230 +108,182 @@ protocol LiveTranscriber {
 }
 ```
 
-The initial implementation uses Tencent Cloud's real-time Chinese/English
-speaker-separation WebSocket API. Credentials are stored in macOS Keychain.
-The application must not write credentials, request signatures, audio, or
-transcript text to logs.
+第一版使用腾讯云实时中英文话者分离 WebSocket API。凭证保存在 macOS Keychain 中。应用不得把凭证、请求签名、音频、字幕正文或带签名的请求地址写入日志。
 
-The normalized event model contains:
+统一后的字幕事件包含：
 
-- utterance identifier;
-- speaker identifier;
-- start and end timestamps;
-- transcript text;
-- provisional or final status.
+- 话语标识；
+- 说话人标识；
+- 开始和结束时间；
+- 字幕文本；
+- 临时或最终状态。
 
-Provider-specific speaker IDs are mapped to stable, user-facing labels within
-the current in-memory session. The UI must tolerate unknown speakers and labels
-that change early in a streaming session.
+在当前内存会话内，把供应商的说话人 ID 映射为稳定的用户标签。界面必须允许出现未知说话人，也必须能够容忍流式会话开始阶段说话人标签发生变化。
 
-### 5.4 Transcript state
+### 5.4 字幕状态
 
-`LiveTranscriptStore` is the single in-memory source of truth. It maintains:
+`LiveTranscriptStore` 是唯一的内存字幕数据源，负责维护：
 
-- the current provisional utterance;
-- ordered confirmed utterances;
-- speaker-label mappings;
-- connection and capture state;
-- meeting start and stop timestamps.
+- 当前临时话语；
+- 按时间排序的已确认话语；
+- 说话人标签映射；
+- 连接和捕获状态；
+- 会议开始和停止时间。
 
-Provisional results replace previous provisional text for the same utterance.
-Final results are appended once and are not subsequently edited by the client.
-The store exposes read-only views to the subtitle and assistant components.
+同一句话的新临时结果替换旧临时文本。最终结果只追加一次，客户端不再自行修改。字幕窗口和 LLM 助手只能读取该数据源，不能直接修改它。
 
-No transcript data is written to preferences, SQLite, files, analytics, crash
-metadata, or application logs.
+字幕不得写入偏好设置、SQLite、文件、分析数据、崩溃信息或应用日志。
 
-## 6. Floating Subtitle Experience
+## 6. 悬浮字幕体验
 
-Use an AppKit `NSPanel` hosting SwiftUI content. During capture the panel:
+使用 AppKit `NSPanel` 承载 SwiftUI 内容。捕获过程中，悬浮窗口应当：
 
-- is frameless, translucent, and always on top;
-- does not activate the application or steal focus from the meeting app;
-- appears near the bottom center of the active display by default;
-- can be dragged and resized;
-- supports adjustable font size and opacity;
-- can be locked into a mouse-pass-through mode;
-- can appear across macOS Spaces;
-- shows the latest three confirmed utterances and one provisional utterance.
+- 无边框、半透明并始终置顶；
+- 不激活应用，也不抢夺会议应用的输入焦点；
+- 默认出现在当前显示器底部中央；
+- 支持拖动和调整大小；
+- 支持调整字号和透明度；
+- 支持锁定为鼠标穿透模式；
+- 能够跨 macOS Space 显示；
+- 展示最近三条已确认字幕和一条临时字幕。
 
-Confirmed text uses normal emphasis. Provisional text is visually muted so the
-user understands that it may change. Generic labels appear as localized names
-such as `Speaker 1`, `Speaker 2`, and `Unknown speaker`.
+已确认字幕使用正常视觉强调；临时字幕使用较弱颜色，明确提示内容仍可能变化。通用说话人标签本地化显示为“发言人 1”“发言人 2”“未知发言人”。
 
-When capture stops, the panel enters review mode. Review mode displays the full
-in-memory transcript in a scrollable view and offers:
+停止捕获后，悬浮窗口进入查看模式。查看模式显示可滚动的完整内存字幕，并提供：
 
-- **Copy full transcript**;
-- **Clear and close**.
+- **复制完整字幕**；
+- **清空并关闭**。
 
-Closing the panel or starting another meeting clears all transcript and LLM
-content. Window position and appearance preferences may persist, but meeting
-content may not.
+关闭窗口或开始新会议时，清除全部字幕和 LLM 内容。窗口位置和外观设置可以持久化，但会议内容不得持久化。
 
-## 7. LLM Meeting Assistant
+## 7. LLM 会议助手
 
-### 7.1 Invocation
+### 7.1 手动调用
 
-The assistant is invoked manually through a configurable global keyboard
-shortcut or an overlay button. It never runs automatically.
+用户通过可配置的全局快捷键或悬浮窗口按钮手动调用助手。助手不得自动运行。
 
-At invocation time, select confirmed utterances whose time ranges intersect the
-30 seconds preceding the trigger. If the first selected utterance crosses the
-30-second boundary, include the complete utterance. Do not include provisional
-text. If no confirmed text is available, show a non-blocking message and do not
-make an LLM request.
+调用时，从触发时刻向前选择 30 秒内时间范围相交的已确认话语。如果最早一条话语跨越 30 秒边界，应保留整句话，不能从中间截断。不得包含临时字幕。如果没有已确认字幕，则显示非阻塞提示，不发送 LLM 请求。
 
-Before sending, show the selected context in an editable composer. The user can
-remove transcript content and add a request. Provide lightweight presets:
+发送前，在可编辑的输入界面中展示选中的上下文。用户可以删除字幕内容并补充要求。提供以下快捷指令：
 
-- Suggest several feasible ideas.
-- Draft something I can say directly.
-- Analyze risks in the proposed approach.
-- Suggest useful follow-up questions.
-- Custom instruction.
+- 给出几个可行的想法；
+- 帮我组织一段可以直接说的话；
+- 分析当前方案的风险；
+- 提出值得追问的问题；
+- 自定义指令。
 
-### 7.2 Response
+### 7.2 回复展示
 
-Stream the response into a separate assistant panel. Default prompts ask for
-concise, meeting-ready output, including a small set of ideas and an optional
-short statement the user can say directly. The user can cancel, retry, copy, or
-close the response.
+LLM 回复以流式方式显示在独立的助手窗口中。默认提示词要求输出简洁、适合会议现场使用的内容，包括少量参考想法，以及一段可选的、用户能直接说出的简短表达。
 
-Only one assistant generation may be active at a time. Starting a new request
-cancels and clears the previous request. Cancellation, timeout, or provider
-failure has no effect on ASR or the subtitle panel.
+用户可以取消、重试、复制或关闭回复。同一时间只允许一个助手生成任务；发起新请求时，取消并清除上一次请求。取消、超时或供应商故障不得影响 ASR 或字幕悬浮窗口。
 
-### 7.3 Configurable provider
+### 7.3 可配置 LLM Provider
 
-Support OpenAI-compatible chat-completions streaming in the first version.
-Configuration includes:
+第一版支持兼容 OpenAI Chat Completions 流式协议的服务。设置项包括：
 
-- provider preset;
-- base URL;
-- model identifier;
-- API key;
-- request timeout;
-- maximum output tokens;
-- temperature;
-- default system prompt;
-- context window duration, defaulting to 30 seconds.
+- Provider 预设；
+- Base URL；
+- 模型标识；
+- API Key；
+- 请求超时时间；
+- 最大输出 Token 数；
+- Temperature；
+- 默认 System Prompt；
+- 上下文时长，默认 30 秒。
 
-Provide presets for OpenAI, OpenRouter, DeepSeek, Ollama, and a custom endpoint.
-Presets populate editable defaults and never include credentials. Store the API
-key in macOS Keychain; store non-secret configuration in application
-preferences. Provide a connection test that sends no meeting transcript.
+内置 OpenAI、OpenRouter、DeepSeek、Ollama 和自定义服务预设。预设只填写可编辑的默认参数，不包含任何凭证。API Key 保存到 macOS Keychain，其他非敏感设置保存到应用偏好设置。
 
-Local OpenAI-compatible endpoints work without an API key when the endpoint
-allows it.
+提供“测试连接”功能，并确保测试请求不包含任何会议字幕。对于不要求鉴权的本地 OpenAI-compatible 服务，允许不填写 API Key。
 
-## 8. Lifecycle
+## 8. 生命周期
 
 ```text
-Idle
-  -> user selects application and starts
-Connecting
-  -> audio tap and ASR connected
-Live
-  -> user stops or selected application exits
-Review
-  -> user may copy transcript or invoke assistant
-  -> panel closes or a new meeting starts
-Cleared / Idle
+空闲（Idle）
+  → 用户选择会议应用并开始
+连接中（Connecting）
+  → 音频 Tap 和 ASR 均连接成功
+实时字幕（Live）
+  → 用户停止，或所选会议应用退出
+查看与复制（Review）
+  → 用户可以复制字幕或调用助手
+  → 关闭窗口，或开始新会议
+已清空 / 空闲
 ```
 
-Starting a new meeting from Review first clears the previous transcript,
-assistant context, active response, and speaker mappings. Application
-termination performs the same clearing operation.
+如果用户在查看状态开始新会议，必须先清除上一场会议的字幕、助手上下文、正在生成的回复和说话人映射。应用退出时执行相同的清除操作。
 
-## 9. Failure Handling
+## 9. 异常处理
 
-### Permissions
+### 9.1 系统权限
 
-If process-audio permission is unavailable, do not start a partial session.
-Explain which macOS permission is required and provide an action that opens the
-appropriate System Settings location.
+如果没有进程音频捕获权限，不得启动不完整的会话。界面应解释需要授予的 macOS 权限，并提供打开对应“系统设置”页面的操作。
 
-### ASR connection
+### 9.2 ASR 连接
 
-- Show explicit `connecting`, `live`, `reconnecting`, and `paused` states.
-- Retry transient connection failures with bounded exponential backoff.
-- Keep already confirmed subtitles in memory during reconnection.
-- Do not replay audio older than the bounded queue permits.
-- After retries are exhausted, stop capture and enter Review with an error
-  banner and the transcript collected so far.
+- 明确展示“连接中”“实时转录”“正在重连”和“已暂停”状态。
+- 使用有上限的指数退避策略重试临时网络故障。
+- 重连期间继续在内存中保留已确认字幕。
+- 不重放超过有界缓冲区容量的旧音频。
+- 重试次数耗尽后停止捕获，进入查看状态，并展示错误信息和已获得的字幕。
 
-### Audio overload
+### 9.3 音频过载
 
-Never block the Core Audio callback. When the queue reaches its fixed limit,
-discard the oldest unsent buffers, increment an in-memory diagnostic counter,
-and show a degraded-quality indicator. Do not log audio data.
+任何情况下都不得阻塞 Core Audio 回调。队列达到固定上限时，丢弃最早的未发送缓冲区，增加仅保存在内存中的诊断计数，并展示质量下降提示。不得记录音频内容。
 
-### LLM failures
+### 9.4 LLM 故障
 
-Timeout, authentication failure, rate limiting, cancellation, or malformed
-streaming data produces an error inside the assistant panel with retry and
-configuration actions. It must not change ASR, capture, or transcript state.
+超时、鉴权失败、限流、用户取消或流式数据格式错误时，在助手窗口内显示错误，并提供重试和打开配置的操作。故障不得改变 ASR、音频捕获或字幕状态。
 
-## 10. Privacy and Security
+## 10. 隐私与安全
 
-- The product captures only the application explicitly selected by the user.
-- Microphone input is never opened by this feature.
-- Audio is streamed to the configured ASR provider and is never written locally.
-- Only the editable, most recent 30 seconds of confirmed transcript is sent to
-  the configured LLM provider when the user manually submits it.
-- Transcript and LLM content are memory-only and cleared on close, new session,
-  or application termination.
-- ASR and LLM credentials are stored in macOS Keychain.
-- UI copy must clearly state when audio or text leaves the Mac.
-- Logs and crash metadata must exclude audio, transcript text, prompts, model
-  responses, credentials, and signed request URLs.
+- 只捕获用户明确选择的应用。
+- 此功能永远不打开麦克风输入。
+- 音频发送给已配置的 ASR 服务商，但不在本地写入文件。
+- 只有用户手动提交时，才把可编辑的最近 30 秒已确认字幕发送给已配置的 LLM 服务商。
+- 字幕和 LLM 内容只保存在内存中，在关闭窗口、开始新会话或退出应用时清除。
+- ASR 和 LLM 凭证保存在 macOS Keychain。
+- 界面必须明确说明音频或文字何时会离开 Mac。
+- 日志和崩溃信息不得包含音频、字幕正文、Prompt、模型回复、凭证或带签名的请求地址。
 
-## 11. Testing Strategy
+## 11. 测试策略
 
-### Unit tests
+### 11.1 单元测试
 
-- PCM conversion, chunk sizing, and bounded-buffer overflow behavior.
-- Provider response normalization for provisional, final, unknown-speaker, and
-  reordered events.
-- Deduplication and replacement behavior in `LiveTranscriptStore`.
-- Stable speaker-label mapping within a session.
-- Exact 30-second context selection, including boundary-crossing utterances.
-- Prompt construction and transcript redaction after user edits.
-- State transitions and clearing behavior.
-- LLM configuration validation and Keychain references.
+- PCM 转换、数据块大小和有界缓冲区溢出行为。
+- 临时结果、最终结果、未知说话人和乱序事件的统一转换。
+- `LiveTranscriptStore` 的去重和临时结果替换行为。
+- 单次会话内稳定的说话人标签映射。
+- 精确选择最近 30 秒上下文，包括跨越边界的话语。
+- Prompt 构造，以及用户编辑后被删除字幕不再进入请求。
+- 生命周期状态转换和内存清除行为。
+- LLM 配置校验和 Keychain 引用。
 
-### Integration tests
+### 11.2 集成测试
 
-- Mock ASR WebSocket reconnect, malformed events, authentication failure, and
-  normal completion.
-- Mock OpenAI-compatible streaming, cancellation, timeout, and rate limiting.
-- Verify that LLM failure cannot terminate or mutate the ASR session.
-- Verify that closing or starting a new meeting releases all content stores.
+- 使用模拟 ASR WebSocket 测试重连、错误事件、鉴权失败和正常结束。
+- 模拟 OpenAI-compatible 流式回复、取消、超时和限流。
+- 验证 LLM 故障不能终止或修改 ASR 会话。
+- 验证关闭窗口或开始新会议会释放全部会议内容。
 
-### Manual macOS verification
+### 11.3 macOS 人工验证
 
-- Capture from Tencent Meeting, Zoom, and Feishu while unrelated audio plays.
-- Permission grant, denial, and revocation flows.
-- Mixed Chinese/English speech and two or more remote speakers.
-- Short utterances, overlapping speech, silence, and changing network quality.
-- Focus behavior, mouse pass-through, multiple displays, Spaces, and full-screen
-  meeting applications.
-- Confirm that no audio, transcript, or assistant content remains on disk after
-  a session.
+- 分别捕获腾讯会议、Zoom 和飞书，同时播放其他无关系统声音。
+- 验证权限允许、拒绝和撤销流程。
+- 验证中英文混说，以及两个或更多远端说话人。
+- 验证短句、重叠发言、静音和网络质量变化。
+- 验证焦点行为、鼠标穿透、多显示器、Space 和全屏会议应用。
+- 确认会话结束后，磁盘中没有遗留音频、字幕或助手内容。
 
-## 12. Acceptance Criteria
+## 12. 验收标准
 
-The first version is complete when:
+第一版满足以下条件时视为完成：
 
-1. The user can select a running meeting application and capture only its audio.
-2. Chinese/English mixed speech appears incrementally in the overlay with
-   generic speaker labels.
-3. The overlay does not steal focus and can be positioned, resized, and locked.
-4. Stopping capture retains the transcript in memory for copying.
-5. Closing the panel or starting a new meeting removes all meeting content.
-6. The user can manually send the most recent 30 seconds of confirmed transcript
-   to a configured OpenAI-compatible model and receive a streaming response.
-7. ASR continues normally when the LLM request fails or is cancelled.
-8. No audio, transcript, prompt, or model response is persisted locally.
-
+1. 用户可以选择一个正在运行的会议应用，并且只捕获该应用的音频。
+2. 中英文混合发言能够增量显示在悬浮窗口中，并带有通用说话人标签。
+3. 悬浮窗口不抢焦点，可以移动、缩放和锁定。
+4. 停止捕获后，字幕继续保留在内存中并允许复制。
+5. 关闭窗口或开始新会议时，所有会议内容都会被清除。
+6. 用户可以手动把最近 30 秒的已确认字幕发送给已配置的 OpenAI-compatible 模型，并收到流式回复。
+7. LLM 请求失败或取消时，ASR 继续正常工作。
+8. 音频、字幕、Prompt 和模型回复均不会持久化到本地。
