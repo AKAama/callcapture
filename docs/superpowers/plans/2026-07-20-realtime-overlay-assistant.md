@@ -53,7 +53,7 @@
 
 ---
 
-### 任务 1：统一字幕模型与纯内存 Store
+### Task 1：统一字幕模型与纯内存 Store
 
 **文件：**
 - 新建：`macos-app/Sources/Live/TranscriptModels.swift`
@@ -98,7 +98,7 @@ git add macos-app/Sources/Live macos-app/Tests/CallCaptureTests/LiveTranscriptSt
 git commit -m "feat(live): add in-memory transcript store"
 ```
 
-### 任务 2：有界 PCM 缓冲区
+### Task 2：有界 PCM 缓冲区
 
 **文件：**
 - 新建：`macos-app/Sources/Live/PCMChunkBuffer.swift`
@@ -132,7 +132,7 @@ git add macos-app/Sources/Live/PCMChunkBuffer.swift macos-app/Tests/CallCaptureT
 git commit -m "feat(live): add bounded PCM buffer"
 ```
 
-### 任务 3：枚举并选择会议应用进程
+### Task 3：枚举并选择会议应用进程
 
 **文件：**
 - 新建：`macos-app/Sources/Capture/AudioProcessEnumerator.swift`
@@ -160,7 +160,7 @@ git add macos-app/Sources/Capture/AudioProcessEnumerator.swift macos-app/Sources
 git commit -m "feat(capture): select an application audio process"
 ```
 
-### 任务 4：把音频采集改为指定进程的内存 PCM 输出
+### Task 4：把音频采集改为指定进程的内存 PCM 输出
 
 **文件：**
 - 修改：`macos-app/Sources/Capture/AudioCaptureManager.swift`
@@ -191,7 +191,7 @@ git add macos-app/Sources/Capture/AudioCaptureManager.swift macos-app/Tests/Call
 git commit -m "feat(capture): stream selected process audio in memory"
 ```
 
-### 任务 5：ASR 协议、腾讯事件解析和签名
+### Task 5：ASR 协议、腾讯事件解析和签名
 
 **文件：**
 - 新建：`macos-app/Sources/Live/LiveTranscriber.swift`
@@ -223,7 +223,7 @@ git add macos-app/Sources/Live macos-app/Tests/CallCaptureTests/TencentTranscrip
 git commit -m "feat(asr): add Tencent transcript decoding and signing"
 ```
 
-### 任务 6：腾讯云实时 WebSocket Transcriber
+### Task 6：腾讯云实时 WebSocket Transcriber
 
 **文件：**
 - 新建：`macos-app/Sources/Live/TencentLiveTranscriber.swift`
@@ -250,7 +250,7 @@ git add macos-app/Sources/Live/TencentLiveTranscriber.swift macos-app/Tests/Call
 git commit -m "feat(asr): stream audio to Tencent ASR"
 ```
 
-### 任务 7：实时会议 Coordinator 和生命周期
+### Task 7：实时会议 Coordinator 和生命周期
 
 **文件：**
 - 新建：`macos-app/Sources/Live/LiveMeetingCoordinator.swift`
@@ -277,7 +277,7 @@ git add macos-app/Sources/Live/LiveMeetingCoordinator.swift macos-app/Sources/Ap
 git commit -m "feat(live): coordinate realtime meeting lifecycle"
 ```
 
-### 任务 8：原生悬浮字幕窗口
+### Task 8：原生悬浮字幕窗口
 
 **文件：**
 - 新建：`macos-app/Sources/UI/SubtitlePanelController.swift`
@@ -306,7 +306,7 @@ git add macos-app/Sources/UI/SubtitlePanelController.swift macos-app/Sources/UI/
 git commit -m "feat(ui): add floating live subtitle panel"
 ```
 
-### 任务 9：可配置 LLM 与流式客户端
+### Task 9：可配置 LLM 与流式客户端
 
 **文件：**
 - 新建：`macos-app/Sources/Assistant/LLMConfiguration.swift`
@@ -331,7 +331,7 @@ git add macos-app/Sources/Assistant macos-app/Sources/Settings macos-app/Tests/C
 git commit -m "feat(assistant): add configurable streaming LLM client"
 ```
 
-### 任务 10：30 秒会议助手与助手窗口
+### Task 10：30 秒会议助手与助手窗口
 
 **文件：**
 - 新建：`macos-app/Sources/Assistant/MeetingAssistant.swift`
@@ -359,7 +359,7 @@ git add macos-app/Sources/Assistant/MeetingAssistant.swift macos-app/Sources/UI/
 git commit -m "feat(assistant): add 30-second meeting copilot"
 ```
 
-### 任务 11：主界面整合、隐私文案与端到端验证
+### Task 11：主界面整合、隐私文案与端到端验证
 
 **文件：**
 - 修改：`macos-app/Sources/App/ContentView.swift`
