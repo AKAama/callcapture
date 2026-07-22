@@ -15,11 +15,15 @@ callcapture/
 │   │   ├── Settings/     # Keychain-backed credentials and realtime settings UI
 │   │   └── UI/           # native subtitle and assistant panels
 │   └── Tests/CallCaptureTests/
-├── python-worker/        # legacy post-meeting worker retained during migration
+├── python-worker/        # legacy post-meeting worker still bundled by build-app.sh
 └── docs/superpowers/     # approved design and implementation plan
 ```
 
 Legacy recording, session, Python-worker, and post-processing modules remain in the package so existing source compatibility is preserved. `ContentView` and the realtime `AppModel` entry points do not call them.
+
+`macos-app/Scripts/build-app.sh` still packages the legacy worker into every
+desktop bundle. A clean source checkout therefore needs the worker's Python
+environment even when validating only the realtime UI.
 
 ## Production data flow
 
@@ -77,6 +81,25 @@ The approved preflight copy is intentionally shared by the menu and Settings:
 
 ## Build and automated verification
 
+### Source-build prerequisites
+
+Install Xcode Command Line Tools (or a full Xcode toolchain with Swift 5.9 or
+later), then create the Python 3.11 virtual environment used to freeze the
+legacy worker:
+
+```bash
+cd python-worker
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e ".[dev,packaging]"
+cd ..
+```
+
+`.[packaging]` supplies PyInstaller, which `build-app.sh` invokes whenever the
+frozen worker is absent, forced, or older than its sources. `.[dev]` adds the
+worker test tools. The script deliberately fails with these setup instructions
+instead of falling back to an unrelated system `pyinstaller` executable.
+
 ```bash
 cd macos-app
 swift test
@@ -90,6 +113,23 @@ git diff --check
 ```bash
 ./macos-app/Scripts/build-app.sh
 open macos-app/.build/CallCapture.app
+```
+
+The bundle scripts ask SwiftPM for its active build directory with
+`swift build --show-bin-path`; they do not assume an Apple-Silicon or Intel
+output path. Check that resolution without assembling, signing, launching, or
+replacing an app bundle:
+
+```bash
+bash macos-app/Scripts/smoke-swift-binary-path.sh
+```
+
+If the active Swift toolchain cannot compile (for example, its compiler and
+macOS SDK versions do not match), run the static-only portion while fixing the
+toolchain selection:
+
+```bash
+bash macos-app/Scripts/smoke-swift-binary-path.sh --syntax-only
 ```
 
 After the first bundle exists, `./run-dev.sh` refreshes its Swift binary, re-signs it with the audio entitlement, and relaunches it. Never use `swift run` for process-tap validation.

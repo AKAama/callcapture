@@ -51,6 +51,8 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for implementation details, verif
 ## Requirements
 
 - macOS **14.2** or later
+- Xcode Command Line Tools (or full Xcode) with Swift 5.9 or later
+- Python **3.11** for the legacy worker bundled by the source-build script
 - Tencent Cloud realtime ASR App ID, Secret ID, and Secret Key
 - An API key for cloud LLM presets; keyless loopback Ollama/custom endpoints are supported
 
@@ -62,7 +64,15 @@ Credentials are stored in the macOS Keychain. Non-sensitive endpoint, model, tim
 git clone https://github.com/bodharma/callcapture.git
 cd callcapture
 
-# First bundle build (includes Info.plist, signing entitlements, and worker resources)
+# build-app.sh still bundles the legacy post-meeting worker. On a clean clone,
+# create its Python 3.11 environment and install PyInstaller first.
+cd python-worker
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e ".[packaging]"
+cd ..
+
+# First bundle build (includes Info.plist, signing entitlements, and the frozen worker)
 ./macos-app/Scripts/build-app.sh
 open macos-app/.build/CallCapture.app
 
