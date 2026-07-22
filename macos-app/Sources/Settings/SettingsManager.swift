@@ -17,8 +17,7 @@ final class SettingsManager {
     /// Legacy single-key field, used by Groq/OpenAI Whisper.
     var remoteApiKey: String = "" {
         didSet {
-            KeychainHelper.save(remoteApiKey, for: "remote_api_key")
-            persist("remote_api_key", "keychain")
+            saveSecretIfReady(remoteApiKey, for: "remote_api_key")
         }
     }
 
@@ -27,16 +26,14 @@ final class SettingsManager {
     /// pick between them at transcribe time based on `session.language`.
     var assemblyAIApiKey: String = "" {
         didSet {
-            KeychainHelper.save(assemblyAIApiKey, for: "assemblyai_api_key")
-            persist("assemblyai_api_key", "keychain")
+            saveSecretIfReady(assemblyAIApiKey, for: "assemblyai_api_key")
         }
     }
 
     /// Deepgram key (see `assemblyAIApiKey`).
     var deepgramApiKey: String = "" {
         didSet {
-            KeychainHelper.save(deepgramApiKey, for: "deepgram_api_key")
-            persist("deepgram_api_key", "keychain")
+            saveSecretIfReady(deepgramApiKey, for: "deepgram_api_key")
         }
     }
 
@@ -44,8 +41,7 @@ final class SettingsManager {
 
     var llmApiKey: String = "" {
         didSet {
-            KeychainHelper.save(llmApiKey, for: "llm_api_key")
-            persist("llm_api_key", "keychain")
+            saveSecretIfReady(llmApiKey, for: "llm_api_key")
         }
     }
 
@@ -53,8 +49,7 @@ final class SettingsManager {
 
     var openRouterApiKey: String = "" {
         didSet {
-            KeychainHelper.save(openRouterApiKey, for: "openrouter_api_key")
-            persist("openrouter_api_key", "keychain")
+            saveSecretIfReady(openRouterApiKey, for: "openrouter_api_key")
         }
     }
 
@@ -79,8 +74,7 @@ final class SettingsManager {
     }
     var assistantLLMAPIKey: String = "" {
         didSet {
-            KeychainHelper.save(assistantLLMAPIKey, for: LLMConfiguration.keychainAccount)
-            persist("assistant_llm_api_key", "keychain")
+            saveSecretIfReady(assistantLLMAPIKey, for: LLMConfiguration.keychainAccount)
         }
     }
     var assistantLLMTimeout: Double = 30 {
@@ -155,6 +149,9 @@ final class SettingsManager {
     var markdownProfile: MarkdownProfile = .meetingNotes { didSet { persist("markdown_profile", markdownProfile.rawValue) } }
 
     private let database: AppDatabase
+    private let loadSecret: (String) -> String
+    private let saveSecret: (String, String) -> Void
+    private var isLoadingSecrets = false
     private static let logger = Logger(
         subsystem: "com.callcapture.app",
         category: "SettingsManager"
@@ -167,9 +164,19 @@ final class SettingsManager {
     /// Creates the settings manager and loads persisted values.
     ///
     /// - Parameter database: The GRDB-backed application database.
-    init(database: AppDatabase) {
+    init(
+        database: AppDatabase,
+        loadSecret: @escaping (String) -> String = { KeychainHelper.load(for: $0) },
+        saveSecret: @escaping (String, String) -> Void = { value, account in
+            KeychainHelper.save(value, for: account)
+        }
+    ) {
         self.database = database
+        self.loadSecret = loadSecret
+        self.saveSecret = saveSecret
+        isLoadingSecrets = true
         loadAll()
+        isLoadingSecrets = false
     }
 
     // MARK: - Private Helpers
@@ -195,6 +202,12 @@ final class SettingsManager {
         } catch {
             Self.logger.error("Failed to persist setting '\(key)': \(error)")
         }
+    }
+
+    private func saveSecretIfReady(_ value: String, for account: String) {
+        guard !isLoadingSecrets else { return }
+        saveSecret(value, account)
+        persist(account, "keychain")
     }
 
     private func loadAll() {
@@ -244,12 +257,12 @@ final class SettingsManager {
         if let raw = rows["llm_fallback_rate_per_1m"], let v = Double(raw) { llmFallbackRatePer1M = v }
 
         // API keys live in Keychain, not SQLite.
-        remoteApiKey = KeychainHelper.load(for: "remote_api_key")
-        assemblyAIApiKey = KeychainHelper.load(for: "assemblyai_api_key")
-        deepgramApiKey = KeychainHelper.load(for: "deepgram_api_key")
-        llmApiKey = KeychainHelper.load(for: "llm_api_key")
-        openRouterApiKey = KeychainHelper.load(for: "openrouter_api_key")
-        assistantLLMAPIKey = KeychainHelper.load(for: LLMConfiguration.keychainAccount)
+        remoteApiKey = loadSecret("remote_api_key")
+        assemblyAIApiKey = loadSecret("assemblyai_api_key")
+        deepgramApiKey = loadSecret("deepgram_api_key")
+        llmApiKey = loadSecret("llm_api_key")
+        openRouterApiKey = loadSecret("openrouter_api_key")
+        assistantLLMAPIKey = loadSecret(LLMConfiguration.keychainAccount)
 
         Self.logger.info("Settings loaded (\(rows.count) persisted keys)")
     }

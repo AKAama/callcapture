@@ -489,33 +489,25 @@ private struct OpenRouterTestRow: View {
 @available(macOS 14.2, *)
 private struct AssistantLLMConnectionTestRow: View {
     let configuration: LLMConfiguration
-
-    private enum Status: Equatable {
-        case idle
-        case testing
-        case connected
-        case failed(String)
-    }
-
-    @State private var status: Status = .idle
+    @State private var tester = AssistantLLMConnectionTester()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Button("Test Assistant Connection") {
-                    Task { await runTest() }
+                    tester.start(configuration: configuration)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(configuration.validationError != nil || status == .testing)
+                .disabled(configuration.validationError != nil || tester.status == .testing)
 
-                if status == .testing {
+                if tester.status == .testing {
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
             }
 
-            switch status {
+            switch tester.status {
             case .idle:
                 if let error = configuration.validationError {
                     Text(error.localizedDescription)
@@ -536,18 +528,68 @@ private struct AssistantLLMConnectionTestRow: View {
                     .foregroundStyle(.red)
             }
         }
-        .onChange(of: configuration) { _, _ in status = .idle }
+        .onChange(of: configuration) { _, _ in tester.reset() }
+        .onDisappear { tester.reset() }
+    }
+}
+
+/// Owns and generations connection probes so superseded work cannot publish UI state.
+@MainActor
+@Observable
+final class AssistantLLMConnectionTester {
+    enum Status: Equatable {
+        case idle
+        case testing
+        case connected
+        case failed(String)
     }
 
-    private func runTest() async {
+    typealias Probe = @Sendable (LLMConfiguration) async throws -> String
+
+    private(set) var status: Status = .idle
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private let probe: Probe
+
+    init(probe: @escaping Probe = { configuration in
+        try await OpenAICompatibleClient().testConnection(configuration: configuration)
+    }) {
+        self.probe = probe
+    }
+
+    func start(configuration: LLMConfiguration) {
+        generation &+= 1
+        let currentGeneration = generation
+        task?.cancel()
         status = .testing
-        do {
-            _ = try await OpenAICompatibleClient().testConnection(configuration: configuration)
-            status = .connected
-        } catch {
-            status = .failed((error as? LocalizedError)?.errorDescription
-                ?? "Connection failed.")
+        let probe = probe
+        task = Task { [weak self] in
+            do {
+                _ = try await probe(configuration)
+                guard !Task.isCancelled else { return }
+                self?.finish(.connected, generation: currentGeneration)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? "Connection failed."
+                self?.finish(.failed(message), generation: currentGeneration)
+            }
         }
+    }
+
+    func reset() {
+        generation &+= 1
+        task?.cancel()
+        task = nil
+        status = .idle
+    }
+
+    private func finish(_ result: Status, generation completedGeneration: Int) {
+        guard generation == completedGeneration else { return }
+        task = nil
+        status = result
     }
 }
 

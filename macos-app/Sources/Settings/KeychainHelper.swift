@@ -28,15 +28,35 @@ enum KeychainHelper {
             kSecAttrAccount as String: account,
         ]
 
-        // Remove any existing item first.
-        SecItemDelete(query as CFDictionary)
+        if value.isEmpty {
+            let status = SecItemDelete(query as CFDictionary)
+            if status != errSecSuccess, status != errSecItemNotFound {
+                logger.error("Keychain delete failed for \(account): \(status)")
+            }
+            return
+        }
 
-        guard !value.isEmpty else { return }
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else {
+            logger.error("Keychain update failed for \(account): \(updateStatus)")
+            return
+        }
 
         var addQuery = query
         addQuery[kSecValueData as String] = data
 
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        var status = SecItemAdd(addQuery as CFDictionary, nil)
+        // Another writer may have inserted the item after our update lookup.
+        if status == errSecDuplicateItem {
+            status = SecItemUpdate(
+                query as CFDictionary,
+                [kSecValueData as String: data] as CFDictionary
+            )
+        }
         if status != errSecSuccess {
             logger.error("Keychain save failed for \(account): \(status)")
         }

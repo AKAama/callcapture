@@ -49,6 +49,7 @@ enum LLMProviderPreset: String, Codable, CaseIterable, Sendable {
 
 enum LLMConfigurationError: Error, Equatable, LocalizedError {
     case invalidBaseURL
+    case insecureTransport
     case missingModel
     case missingAPIKey
     case invalidTimeout
@@ -59,6 +60,7 @@ enum LLMConfigurationError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidBaseURL: "Enter an absolute HTTP or HTTPS base URL."
+        case .insecureTransport: "Use HTTPS. Plain HTTP is allowed only for keyless localhost or loopback endpoints."
         case .missingModel: "Enter a model identifier."
         case .missingAPIKey: "Enter an API key for this provider."
         case .invalidTimeout: "Timeout must be greater than zero."
@@ -96,7 +98,10 @@ struct LLMConfiguration: Equatable, Sendable {
     }
 
     func validate() throws {
-        _ = try chatCompletionsURL()
+        let endpoint = try chatCompletionsURL()
+        guard Self.isAllowedTransport(to: endpoint, apiKey: apiKey) else {
+            throw LLMConfigurationError.insecureTransport
+        }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LLMConfigurationError.missingModel
         }
@@ -128,6 +133,32 @@ struct LLMConfiguration: Equatable, Sendable {
             throw LLMConfigurationError.invalidBaseURL
         }
         return base.appendingPathComponent("chat/completions")
+    }
+
+    static func isAllowedTransport(to url: URL, apiKey: String) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        if scheme == "https" { return true }
+        guard scheme == "http",
+              apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return isExplicitLoopbackHost(url.host)
+    }
+
+    private static func isExplicitLoopbackHost(_ host: String?) -> Bool {
+        guard var host = host?.lowercased(), !host.isEmpty else { return false }
+        if host.hasSuffix(".") { host.removeLast() }
+        if host == "localhost" || host == "::1" { return true }
+
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4,
+              octets.allSatisfy({ octet in
+                  guard let value = UInt8(octet), String(value) == octet else { return false }
+                  return true
+              }) else {
+            return false
+        }
+        return octets[0] == "127"
     }
 }
 

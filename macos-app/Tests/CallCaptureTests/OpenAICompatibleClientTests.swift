@@ -81,6 +81,85 @@ struct OpenAICompatibleClientTests {
         #expect(authorization.value == nil)
     }
 
+    @Test("a keyed plaintext request is rejected before transport")
+    func keyedHTTPIsRejectedBeforeTransport() async {
+        let requestCount = LockedBox(0)
+        let session = makeSession { _, _, _ in
+            requestCount.withValue { $0 += 1 }
+        }
+        defer { session.invalidateAndCancel() }
+        var insecure = configuration()
+        insecure.baseURL = "http://localhost:11434/v1"
+
+        do {
+            _ = try await collect(OpenAICompatibleClient(session: session).stream(
+                messages: [.init(role: .user, content: "private-prompt-marker")],
+                configuration: insecure
+            ))
+            Issue.record("Expected insecure keyed configuration to fail")
+        } catch {
+            #expect(error as? OpenAICompatibleClientError == .insecureTransport)
+            #expect(requestCount.value == 0)
+        }
+    }
+
+    @Test("redirect policy does not forward secrets to plaintext URLs")
+    func redirectTransportPolicy() {
+        let keyed = SecureLLMRedirectDelegate(apiKey: "secret")
+        #expect(keyed.shouldFollowRedirect(to: URL(string: "https://example.com/v1")!))
+        #expect(!keyed.shouldFollowRedirect(to: URL(string: "http://localhost:11434/v1")!))
+        #expect(!keyed.shouldFollowRedirect(to: URL(string: "http://example.com/v1")!))
+
+        let keyless = SecureLLMRedirectDelegate(apiKey: "")
+        #expect(keyless.shouldFollowRedirect(to: URL(string: "http://127.0.0.1:11434/v1")!))
+        #expect(!keyless.shouldFollowRedirect(to: URL(string: "http://example.com/v1")!))
+    }
+
+    @Test("successful HTTP responses must declare an SSE content type")
+    func rejectsNonSSESuccess() async {
+        let session = makeSession { protocolClient, protocolInstance, request in
+            respond(
+                status: 200,
+                contentType: "application/json",
+                request: request,
+                client: protocolClient,
+                protocol: protocolInstance
+            )
+            protocolClient.urlProtocol(protocolInstance, didLoad: Data("data: [DONE]\n\n".utf8))
+            protocolClient.urlProtocolDidFinishLoading(protocolInstance)
+        }
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await collect(OpenAICompatibleClient(session: session).stream(
+                messages: [.init(role: .user, content: "hi")],
+                configuration: configuration()
+            ))
+            Issue.record("Expected non-SSE response to fail")
+        } catch {
+            #expect(error as? OpenAICompatibleClientError == .invalidResponse)
+        }
+    }
+
+    @Test("an empty SSE response is invalid")
+    func rejectsEmptySSEResponse() async {
+        let session = makeSession { protocolClient, protocolInstance, request in
+            respond(status: 200, request: request, client: protocolClient, protocol: protocolInstance)
+            protocolClient.urlProtocolDidFinishLoading(protocolInstance)
+        }
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await collect(OpenAICompatibleClient(session: session).stream(
+                messages: [.init(role: .user, content: "hi")],
+                configuration: configuration()
+            ))
+            Issue.record("Expected empty SSE response to fail")
+        } catch {
+            #expect(error as? OpenAICompatibleClientError == .invalidResponse)
+        }
+    }
+
     @Test("maps 401 and 429 without exposing response bodies")
     func mapsHTTPFailures() async {
         for (status, expected) in [
@@ -177,6 +256,49 @@ struct OpenAICompatibleClientTests {
         #expect(!String(decoding: data, as: UTF8.self).contains("meeting-transcript-marker"))
     }
 
+    @Test("connection test requires a non-empty reply")
+    func connectionTestRejectsEmptyReply() async {
+        let session = makeSession { protocolClient, protocolInstance, request in
+            respond(status: 200, request: request, client: protocolClient, protocol: protocolInstance)
+            protocolClient.urlProtocol(protocolInstance, didLoad: Data("data: [DONE]\n\n".utf8))
+            protocolClient.urlProtocolDidFinishLoading(protocolInstance)
+        }
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await OpenAICompatibleClient(session: session).testConnection(
+                configuration: configuration()
+            )
+            Issue.record("Expected empty probe reply to fail")
+        } catch {
+            #expect(error as? OpenAICompatibleClientError == .invalidResponse)
+        }
+    }
+
+    @MainActor
+    @Test("stale connection tests cannot overwrite current status")
+    func connectionTestIgnoresStaleCompletion() async throws {
+        let gate = ConnectionProbeGate()
+        let tester = AssistantLLMConnectionTester { configuration in
+            try await gate.probe(configuration)
+        }
+        var first = configuration()
+        first.model = "first"
+        var second = configuration()
+        second.model = "second"
+
+        tester.start(configuration: first)
+        try await waitUntilAsync { await gate.firstStarted }
+        tester.start(configuration: second)
+        try await waitUntilMainActor { tester.status == .failed("second failed") }
+        await gate.finishFirst()
+        try await Task.sleep(for: .milliseconds(20))
+
+        #expect(tester.status == .failed("second failed"))
+        tester.reset()
+        #expect(tester.status == .idle)
+    }
+
     private func configuration() -> LLMConfiguration {
         LLMConfiguration(
             preset: .custom,
@@ -209,6 +331,7 @@ private func makeSession(
 
 private func respond(
     status: Int,
+    contentType: String = "text/event-stream",
     request: URLRequest,
     client: URLProtocolClient,
     protocol protocolInstance: URLProtocol
@@ -217,9 +340,32 @@ private func respond(
         url: request.url!,
         statusCode: status,
         httpVersion: "HTTP/1.1",
-        headerFields: ["Content-Type": "text/event-stream"]
+        headerFields: ["Content-Type": contentType]
     )!
     client.urlProtocol(protocolInstance, didReceive: response, cacheStoragePolicy: .notAllowed)
+}
+
+private actor ConnectionProbeGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var firstStarted = false
+
+    func probe(_ configuration: LLMConfiguration) async throws -> String {
+        if configuration.model == "first" {
+            firstStarted = true
+            await withCheckedContinuation { continuation = $0 }
+            return "OK"
+        }
+        throw ConnectionProbeError()
+    }
+
+    func finishFirst() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private struct ConnectionProbeError: LocalizedError {
+    var errorDescription: String? { "second failed" }
 }
 
 private func requestBodyData(for request: URLRequest) -> Data? {
@@ -276,6 +422,31 @@ private final class LockedBox<Value>: @unchecked Sendable {
 private func waitUntil(
     timeout: Duration = .seconds(1),
     condition: @escaping @Sendable () -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !condition() {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+private func waitUntilAsync(
+    timeout: Duration = .seconds(1),
+    condition: @escaping @Sendable () async -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !(await condition()) {
+        guard clock.now < deadline else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func waitUntilMainActor(
+    timeout: Duration = .seconds(1),
+    condition: @escaping @MainActor () -> Bool
 ) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)

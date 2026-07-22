@@ -5,6 +5,7 @@ enum OpenAICompatibleClientError: Error, Equatable, LocalizedError {
     case unauthorized
     case rateLimited
     case httpStatus(Int)
+    case insecureTransport
     case invalidResponse
     case timedOut
     case transport
@@ -14,6 +15,7 @@ enum OpenAICompatibleClientError: Error, Equatable, LocalizedError {
         case .unauthorized: "The provider rejected the API key (401)."
         case .rateLimited: "The provider rate limit was reached (429)."
         case .httpStatus(let status): "The provider returned HTTP \(status)."
+        case .insecureTransport: "The provider connection is not secure."
         case .invalidResponse: "The provider returned an invalid streaming response."
         case .timedOut: "The provider request timed out."
         case .transport: "The provider could not be reached."
@@ -25,6 +27,7 @@ enum OpenAICompatibleClientError: Error, Equatable, LocalizedError {
         case .unauthorized: "unauthorized"
         case .rateLimited: "rate_limited"
         case .httpStatus: "http_status"
+        case .insecureTransport: "insecure_transport"
         case .invalidResponse: "invalid_response"
         case .timedOut: "timeout"
         case .transport: "transport"
@@ -55,8 +58,15 @@ struct OpenAICompatibleClient: Sendable {
                 do {
                     try configuration.validate()
                     let request = try makeRequest(messages: messages, configuration: configuration)
-                    let (bytes, response) = try await session.bytes(for: request)
-                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    let redirectDelegate = SecureLLMRedirectDelegate(apiKey: configuration.apiKey)
+                    let (bytes, response) = try await session.bytes(
+                        for: request,
+                        delegate: redirectDelegate
+                    )
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        throw OpenAICompatibleClientError.invalidResponse
+                    }
+                    let status = httpResponse.statusCode
                     Self.logger.info("LLM stream HTTP status=\(status)")
                     switch status {
                     case 200..<300:
@@ -67,6 +77,16 @@ struct OpenAICompatibleClient: Sendable {
                         throw OpenAICompatibleClientError.rateLimited
                     default:
                         throw OpenAICompatibleClientError.httpStatus(status)
+                    }
+
+                    let contentType = httpResponse
+                        .value(forHTTPHeaderField: "Content-Type")?
+                        .split(separator: ";", maxSplits: 1)
+                        .first?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                    guard contentType == "text/event-stream" else {
+                        throw OpenAICompatibleClientError.invalidResponse
                     }
 
                     try await parse(bytes: bytes, continuation: continuation)
@@ -92,6 +112,9 @@ struct OpenAICompatibleClient: Sendable {
         var reply = ""
         for try await chunk in stream(messages: [probe], configuration: configuration) {
             reply += chunk
+        }
+        guard !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw OpenAICompatibleClientError.invalidResponse
         }
         return reply
     }
@@ -139,32 +162,41 @@ struct OpenAICompatibleClient: Sendable {
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
         var line = Data()
+        var sawDataEvent = false
         for try await byte in bytes {
             try Task.checkCancellation()
             if byte == 0x0A {
-                if try consume(line: line, continuation: continuation) { return }
+                if let isDone = try consume(line: line, continuation: continuation) {
+                    sawDataEvent = true
+                    if isDone { return }
+                }
                 line.removeAll(keepingCapacity: true)
             } else if byte != 0x0D {
                 line.append(byte)
             }
         }
         if !line.isEmpty {
-            _ = try consume(line: line, continuation: continuation)
+            if try consume(line: line, continuation: continuation) != nil {
+                sawDataEvent = true
+            }
         }
+        guard sawDataEvent else { throw OpenAICompatibleClientError.invalidResponse }
     }
 
-    /// Returns true when the terminal `[DONE]` event was consumed.
+    /// Returns nil for a non-data SSE line, false for JSON data, and true for `[DONE]`.
     private func consume(
         line: Data,
         continuation: AsyncThrowingStream<String, Error>.Continuation
-    ) throws -> Bool {
+    ) throws -> Bool? {
         guard let text = String(data: line, encoding: .utf8) else {
             throw OpenAICompatibleClientError.invalidResponse
         }
-        guard text.hasPrefix("data:") else { return false }
+        guard text.hasPrefix("data:") else { return nil }
         let payload = text.dropFirst(5).trimmingCharacters(in: .whitespaces)
         if payload == "[DONE]" { return true }
-        guard !payload.isEmpty, let data = payload.data(using: .utf8) else { return false }
+        guard !payload.isEmpty, let data = payload.data(using: .utf8) else {
+            throw OpenAICompatibleClientError.invalidResponse
+        }
 
         struct Envelope: Decodable {
             struct Choice: Decodable {
@@ -189,7 +221,33 @@ struct OpenAICompatibleClient: Sendable {
 
     private func sanitize(_ error: Error) -> OpenAICompatibleClientError {
         if let error = error as? OpenAICompatibleClientError { return error }
+        if let error = error as? LLMConfigurationError, error == .insecureTransport {
+            return .insecureTransport
+        }
         if let error = error as? URLError, error.code == .timedOut { return .timedOut }
         return .transport
+    }
+}
+
+/// Applies the same transport rule to redirects as initial configuration validation.
+final class SecureLLMRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let apiKey: String
+
+    init(apiKey: String) {
+        self.apiKey = apiKey
+    }
+
+    func shouldFollowRedirect(to url: URL) -> Bool {
+        LLMConfiguration.isAllowedTransport(to: url, apiKey: apiKey)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(request.url.map(shouldFollowRedirect(to:)) == true ? request : nil)
     }
 }

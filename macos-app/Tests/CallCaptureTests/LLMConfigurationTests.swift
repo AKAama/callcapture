@@ -33,6 +33,23 @@ struct LLMConfigurationTests {
         }
     }
 
+    @Test("plaintext HTTP is limited to keyless loopback endpoints")
+    func secureTransportValidation() {
+        for baseURL in [
+            "http://localhost:11434/v1",
+            "http://localhost.:11434/v1",
+            "http://127.0.0.2:11434/v1",
+            "http://[::1]:11434/v1",
+        ] {
+            #expect(configuration(baseURL: baseURL, apiKey: "").validationError == nil)
+        }
+
+        #expect(configuration(baseURL: "https://example.com/v1", apiKey: "secret").validationError == nil)
+        #expect(configuration(baseURL: "http://example.com/v1", apiKey: "").validationError == .insecureTransport)
+        #expect(configuration(baseURL: "http://localhost:11434/v1", apiKey: "secret").validationError == .insecureTransport)
+        #expect(configuration(baseURL: "http://127.0.0.1.example.com/v1", apiKey: "").validationError == .insecureTransport)
+    }
+
     @Test("cloud providers require a key while local Ollama allows an empty key")
     func optionalLocalKey() {
         #expect(LLMProviderPreset.openAI.requiresAPIKey)
@@ -47,6 +64,31 @@ struct LLMConfigurationTests {
     @Test("assistant secret uses a dedicated stable Keychain account")
     func keychainAccount() {
         #expect(LLMConfiguration.keychainAccount == "assistant_llm_api_key")
+    }
+
+
+    @Test("loading Keychain secrets does not write them back")
+    func settingsInitializationDoesNotWriteSecrets() throws {
+        let path = NSTemporaryDirectory() + "cc-assistant-settings-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let database = try AppDatabase(path: path)
+        let saves = SettingsSaveRecorder()
+
+        let settings = SettingsManager(
+            database: database,
+            loadSecret: { account in
+                account == LLMConfiguration.keychainAccount ? "loaded-secret" : ""
+            },
+            saveSecret: { value, account in
+                saves.record(value: value, account: account)
+            }
+        )
+
+        #expect(settings.assistantLLMAPIKey == "loaded-secret")
+        #expect(saves.values.isEmpty)
+
+        settings.assistantLLMAPIKey = "replacement"
+        #expect(saves.values == [LLMConfiguration.keychainAccount: "replacement"])
     }
 
     private func configuration(
@@ -65,5 +107,22 @@ struct LLMConfigurationTests {
             systemPrompt: "Be concise.",
             contextDuration: 30
         )
+    }
+}
+
+private final class SettingsSaveRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String: String] = [:]
+
+    var values: [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func record(value: String, account: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored[account] = value
     }
 }
