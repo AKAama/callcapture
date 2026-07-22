@@ -162,3 +162,30 @@ Two review findings were addressed without removing the legacy worker bundle:
    scan confirmed matching Python/PyInstaller worker prerequisites and
    `--show-bin-path` usage, with no hard-coded arm64/x86_64 product path in
    either bundle script.
+
+## Follow-up: Release Workflow Assembler Interface
+
+The release workflow previously still invoked `assemble-app.sh` with the old
+`release` configuration argument. It now builds the release product first,
+uses `swift build -c release --show-bin-path` to locate the active SwiftPM
+output directory, verifies the `CallCapture` executable, and exports that
+path as `CALLCAPTURE_SWIFT_BINARY` for the assembly step. This keeps the
+workflow architecture-independent and matches the current assembler contract.
+
+The safe `smoke-swift-binary-path.sh --syntax-only` check now also validates
+that the release workflow orders release build, binary resolution, and
+assembly correctly, and that assembly receives the exported binary path.
+
+### Release workflow verification evidence
+
+1. The new workflow-interface static smoke failed before the workflow update
+   with `release workflow must build, resolve, then assemble with
+   CALLCAPTURE_SWIFT_BINARY`, then passed after the update.
+2. `bash -n` completed for the bundle and smoke scripts, and the static smoke
+   printed `swift-binary-path-static-smoke-pass`.
+3. Ruby parsed `.github/workflows/release.yml` successfully.
+4. `swift build -c release --product CallCapture` completed successfully, and
+   `swift build -c release --show-bin-path` resolved an executable release
+   `CallCapture` binary. This sandboxed host required a writable temporary
+   compiler module-cache location.
+5. `git diff --check` completed with no output.

@@ -7,6 +7,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_DIR="$(cd "$APP_DIR/.." && pwd)"
+RELEASE_WORKFLOW="$REPO_DIR/.github/workflows/release.yml"
 MODE="${1:-build}"
 
 case "$MODE" in
@@ -25,6 +27,17 @@ fi
 
 grep -F -- '--show-bin-path' "$SCRIPT_DIR/build-app.sh" >/dev/null || {
     echo "error: build-app.sh must resolve the SwiftPM build directory dynamically" >&2
+    exit 1
+}
+
+RELEASE_BUILD_LINE="$(grep -nF 'swift build -c release --product CallCapture' "$RELEASE_WORKFLOW" | head -1 | cut -d: -f1 || true)"
+RELEASE_RESOLVE_LINE="$(grep -nF 'swift build -c release --show-bin-path' "$RELEASE_WORKFLOW" | head -1 | cut -d: -f1 || true)"
+RELEASE_ASSEMBLE_LINE="$(grep -nF './Scripts/assemble-app.sh "$CALLCAPTURE_SWIFT_BINARY" ../python-worker/dist/call-capture-worker' "$RELEASE_WORKFLOW" | head -1 | cut -d: -f1 || true)"
+
+[[ -n "$RELEASE_BUILD_LINE" && -n "$RELEASE_RESOLVE_LINE" && -n "$RELEASE_ASSEMBLE_LINE" \
+    && "$RELEASE_BUILD_LINE" -lt "$RELEASE_RESOLVE_LINE" \
+    && "$RELEASE_RESOLVE_LINE" -lt "$RELEASE_ASSEMBLE_LINE" ]] || {
+    echo "error: release workflow must build, resolve, then assemble with CALLCAPTURE_SWIFT_BINARY" >&2
     exit 1
 }
 

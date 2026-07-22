@@ -42,15 +42,19 @@ jobs:
           chmod +x packaging/smoke_test.sh
           ./packaging/smoke_test.sh
 
-      - name: Build Swift (release)
+      - name: Build and resolve Swift product (release)
         working-directory: macos-app
         run: |
           sudo xcode-select -s /Applications/Xcode_16.app || true
           swift build -c release --product CallCapture
+          BIN_DIR="$(swift build -c release --show-bin-path)"
+          SWIFT_BINARY="$BIN_DIR/CallCapture"
+          test -x "$SWIFT_BINARY"
+          echo "CALLCAPTURE_SWIFT_BINARY=$SWIFT_BINARY" >> "$GITHUB_ENV"
 
       - name: Assemble .app
         working-directory: macos-app
-        run: ./Scripts/assemble-app.sh release ../python-worker/dist/call-capture-worker
+        run: ./Scripts/assemble-app.sh "$CALLCAPTURE_SWIFT_BINARY" ../python-worker/dist/call-capture-worker
 
       - name: Check for signing secrets
         id: secrets
