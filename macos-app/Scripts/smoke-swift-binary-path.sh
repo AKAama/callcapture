@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$APP_DIR/.." && pwd)"
 RELEASE_WORKFLOW="$REPO_DIR/.github/workflows/release.yml"
+DEV_LAUNCHER="$REPO_DIR/run-dev.sh"
 MODE="${1:-build}"
 
 case "$MODE" in
@@ -29,6 +30,16 @@ grep -F -- '--show-bin-path' "$SCRIPT_DIR/build-app.sh" >/dev/null || {
     echo "error: build-app.sh must resolve the SwiftPM build directory dynamically" >&2
     exit 1
 }
+
+grep -F '"$APP_DIR/Scripts/build-app.sh"' "$DEV_LAUNCHER" >/dev/null || {
+    echo "error: run-dev.sh must reuse build-app.sh to create and refresh the app bundle" >&2
+    exit 1
+}
+
+if grep -Eq 'cp .*\.build/(debug/)?CallCapture' "$DEV_LAUNCHER"; then
+    echo "error: run-dev.sh must not copy a hard-coded SwiftPM binary path" >&2
+    exit 1
+fi
 
 RELEASE_BUILD_LINE="$(grep -nF 'swift build -c release --product CallCapture' "$RELEASE_WORKFLOW" | head -1 | cut -d: -f1 || true)"
 RELEASE_RESOLVE_LINE="$(grep -nF 'swift build -c release --show-bin-path' "$RELEASE_WORKFLOW" | head -1 | cut -d: -f1 || true)"

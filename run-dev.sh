@@ -8,19 +8,8 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$REPO_DIR/macos-app"
 BUNDLE="$APP_DIR/.build/CallCapture.app"
 
-echo "Building Swift app..."
-cd "$APP_DIR" && swift build 2>&1
-
-echo "Updating app bundle..."
-cp "$APP_DIR/.build/debug/CallCapture" "$BUNDLE/Contents/MacOS/CallCapture"
-
-# Re-sign after swapping the binary. Copying a fresh executable in invalidates
-# the bundle's signature (identifier reverts to swift-build's CallCapture-<hash>
-# and the entitlements are dropped), which denies the Core Audio process tap
-# ("failed to create audiotap"). sign-app.sh restores the com.callcapture.app
-# identifier + the audio-input entitlement (ad-hoc).
-echo "Signing app bundle (ad-hoc + entitlements)..."
-"$APP_DIR/Scripts/sign-app.sh" "$BUNDLE"
+echo "Building and signing app bundle..."
+"$APP_DIR/Scripts/build-app.sh"
 
 echo "Launching CallCapture (dev mode)..."
 export CALLCAPTURE_DEV_MODE=1
