@@ -15,6 +15,14 @@ final class LiveTranscriptStore {
     private var confirmedByID: [String: TranscriptUtterance] = [:]
     private var labelBySpeakerID: [String: String] = [:]
 
+    /// Latest endpoint in the provider's meeting-relative transcript timeline.
+    /// Assistant windows must use this coordinate system rather than wall time.
+    var currentMeetingTime: TimeInterval {
+        let confirmedEndMS = confirmedUtterances.lazy.map(\.endMS).max() ?? 0
+        let partialEndMS = partialUtterance?.endMS ?? 0
+        return TimeInterval(max(confirmedEndMS, partialEndMS)) / 1_000
+    }
+
     func apply(_ event: TranscriptEvent) {
         switch event {
         case let .partial(id, speakerID, text, startMS, endMS):
@@ -50,7 +58,10 @@ final class LiveTranscriptStore {
     /// Returns final utterances whose complete interval intersects the requested window.
     func context(endingAt: TimeInterval, duration: TimeInterval) -> [TranscriptUtterance] {
         let lowerBoundMS = Int((endingAt - duration) * 1_000)
-        return confirmedUtterances.filter { $0.endMS >= lowerBoundMS }
+        let upperBoundMS = Int(endingAt * 1_000)
+        return confirmedUtterances.filter {
+            $0.endMS >= lowerBoundMS && $0.startMS <= upperBoundMS
+        }
     }
 
     /// Full confirmed transcript, formatted for the system pasteboard.

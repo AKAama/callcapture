@@ -6,6 +6,19 @@ import Testing
 
 @Suite("30-second meeting assistant")
 struct MeetingAssistantTests {
+    @Test("production composition uses the transcript meeting-relative endpoint")
+    @MainActor func composesWithProductionTimebase() {
+        let store = populatedStore()
+        let assistant = MeetingAssistant(
+            store: store,
+            client: RecordingMeetingAssistantClient(),
+            configurationProvider: { Self.configuration }
+        )
+
+        #expect(assistant.compose(instruction: "给出想法"))
+        #expect(assistant.contextText == "发言人 1：original-transcript-marker")
+    }
+
     @Test("default composition selects exactly 30 seconds in chronological speaker-labelled form")
     @MainActor func composesDefaultContext() throws {
         let store = LiveTranscriptStore()
@@ -150,6 +163,63 @@ struct MeetingAssistantTests {
         #expect(assistant.contextText.isEmpty)
         #expect(assistant.draft.isEmpty)
         #expect(assistant.reply.isEmpty)
+        #expect(assistant.errorMessage == nil)
+    }
+
+    @Test("clear before task startup prevents crossing the client stream boundary")
+    @MainActor func clearBeforeTaskStartupPreventsStream() async {
+        let client = RecordingMeetingAssistantClient()
+        let assistant = MeetingAssistant(
+            store: populatedStore(),
+            client: client,
+            configurationProvider: { Self.configuration },
+            clock: FixedMeetingAssistantClock(now: 100)
+        )
+        #expect(assistant.compose(instruction: "分析风险"))
+        #expect(assistant.submit())
+
+        assistant.clear()
+        await Task.yield()
+
+        #expect(client.requests.isEmpty)
+        #expect(assistant.state == .idle)
+    }
+
+    @Test("replacement before task startup sends only the newest request")
+    @MainActor func replacementBeforeTaskStartupPreventsStaleStream() async {
+        let client = RecordingMeetingAssistantClient()
+        let assistant = MeetingAssistant(
+            store: populatedStore(),
+            client: client,
+            configurationProvider: { Self.configuration },
+            clock: FixedMeetingAssistantClock(now: 100)
+        )
+        #expect(assistant.compose(instruction: "first"))
+        assistant.draft = "first-edit"
+        #expect(assistant.submit())
+
+        assistant.draft = "second-edit"
+        #expect(assistant.submit())
+        await waitUntil { client.requests.count == 1 && assistant.state == .completed }
+
+        #expect(client.requests.single?.messages.last?.content == "second-edit")
+    }
+
+    @Test("a current stream cancellation returns to composing")
+    @MainActor func handlesCurrentStreamCancellation() async {
+        let client = RecordingMeetingAssistantClient(error: CancellationError())
+        let assistant = MeetingAssistant(
+            store: populatedStore(),
+            client: client,
+            configurationProvider: { Self.configuration },
+            clock: FixedMeetingAssistantClock(now: 100)
+        )
+        #expect(assistant.compose(instruction: "追问问题"))
+        #expect(assistant.submit())
+
+        await waitUntil { assistant.state != .generating }
+
+        #expect(assistant.state == .composing)
         #expect(assistant.errorMessage == nil)
     }
 

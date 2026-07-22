@@ -38,11 +38,22 @@ struct LiveTranscriptStoreTests {
     @Test("30 秒上下文只包含已确认话语并保留跨界整句")
     @MainActor func selectsContext() {
         let store = LiveTranscriptStore()
+        store.apply(.confirmed(id: "old", speakerID: "1", text: "太早", startMS: 60_000, endMS: 69_999))
         store.apply(.confirmed(id: "a", speakerID: "1", text: "较早但跨界", startMS: 69_000, endMS: 71_000))
         store.apply(.partial(id: "p", speakerID: "2", text: "临时", startMS: 95_000, endMS: 99_000))
         store.apply(.confirmed(id: "b", speakerID: "2", text: "当前问题", startMS: 90_000, endMS: 100_000))
+        store.apply(.confirmed(id: "future", speakerID: "2", text: "未来话语", startMS: 100_001, endMS: 101_000))
 
         #expect(store.context(endingAt: 100, duration: 30).map(\.id) == ["a", "b"])
+    }
+
+    @Test("当前会议时间使用字幕的会话相对时间基准")
+    @MainActor func exposesMeetingRelativeTime() {
+        let store = LiveTranscriptStore()
+        store.apply(.confirmed(id: "a", speakerID: "1", text: "较早", startMS: 1_000, endMS: 2_000))
+        store.apply(.partial(id: "p", speakerID: "2", text: "当前", startMS: 9_000, endMS: 10_500))
+
+        #expect(store.currentMeetingTime == 10.5)
     }
 
     @Test("复制文本只包含已确认字幕并保留说话人标签")

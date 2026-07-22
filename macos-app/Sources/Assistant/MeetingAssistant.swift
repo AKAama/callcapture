@@ -13,10 +13,6 @@ protocol MeetingAssistantClock: Sendable {
     var now: TimeInterval { get }
 }
 
-struct SystemMeetingAssistantClock: MeetingAssistantClock {
-    var now: TimeInterval { Date().timeIntervalSince1970 }
-}
-
 protocol MeetingAssistantStreaming: Sendable {
     func stream(
         messages: [LLMMessage],
@@ -79,7 +75,7 @@ final class MeetingAssistant {
     @ObservationIgnored
     private let configurationProvider: @MainActor () -> LLMConfiguration
     @ObservationIgnored
-    private let clock: any MeetingAssistantClock
+    private let clock: (any MeetingAssistantClock)?
     @ObservationIgnored
     private let contextDuration: TimeInterval
 
@@ -92,7 +88,7 @@ final class MeetingAssistant {
         store: LiveTranscriptStore,
         client: any MeetingAssistantStreaming = OpenAICompatibleClient(),
         configurationProvider: @escaping @MainActor () -> LLMConfiguration,
-        clock: any MeetingAssistantClock = SystemMeetingAssistantClock(),
+        clock: (any MeetingAssistantClock)? = nil,
         contextDuration: TimeInterval = MeetingAssistant.defaultContextDuration
     ) {
         self.store = store
@@ -109,8 +105,9 @@ final class MeetingAssistant {
         reply = ""
         errorMessage = nil
 
+        let endingAt = clock?.now ?? store.currentMeetingTime
         let utterances = store
-            .context(endingAt: clock.now, duration: contextDuration)
+            .context(endingAt: endingAt, duration: contextDuration)
             .sorted {
                 if $0.startMS == $1.startMS { return $0.endMS < $1.endMS }
                 return $0.startMS < $1.startMS
@@ -173,6 +170,8 @@ final class MeetingAssistant {
         let client = self.client
         requestTask = Task { [weak self] in
             do {
+                try Task.checkCancellation()
+                guard self?.requestGeneration == generation else { return }
                 let stream = client.stream(
                     messages: messages,
                     configuration: configuration
@@ -188,7 +187,10 @@ final class MeetingAssistant {
                 self.requestTask = nil
                 self.state = .completed
             } catch is CancellationError {
-                // Cancellation is expected when replacing, clearing, or closing.
+                guard let self, self.requestGeneration == generation else { return }
+                self.requestTask = nil
+                self.state = .composing
+                self.errorMessage = nil
             } catch {
                 guard let self, self.requestGeneration == generation else { return }
                 self.requestTask = nil
