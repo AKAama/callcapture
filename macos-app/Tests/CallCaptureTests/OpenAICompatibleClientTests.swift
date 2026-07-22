@@ -29,6 +29,32 @@ struct OpenAICompatibleClientTests {
         #expect(chunks == ["Hel", "lo"])
     }
 
+    @Test("frames SSE events across data fields and all supported line endings")
+    func parsesFramedMultilineSSE() async throws {
+        let session = makeSession { protocolClient, protocolInstance, request in
+            respond(status: 200, request: request, client: protocolClient, protocol: protocolInstance)
+            let fragments = [
+                "data: {\"choices\":[\rda",
+                "ta: {\"delta\":{\"content\":\"multi\"}}\rdata: ]}\r\r",
+                ": keepalive\r\nevent: message\r\ndata: {\"choices\":[{\"delta\":",
+                "{\"content\":\"line\"}}]}\r\n\r\ndata: [DO",
+                "NE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"ignored\"}}]}\n\n",
+            ]
+            for fragment in fragments {
+                protocolClient.urlProtocol(protocolInstance, didLoad: Data(fragment.utf8))
+            }
+            protocolClient.urlProtocolDidFinishLoading(protocolInstance)
+        }
+        defer { session.invalidateAndCancel() }
+
+        let chunks = try await collect(OpenAICompatibleClient(session: session).stream(
+            messages: [.init(role: .user, content: "request-marker")],
+            configuration: configuration()
+        ))
+
+        #expect(chunks == ["multi", "line"])
+    }
+
     @Test("request body contains only the supported Chat Completions fields")
     func exactRequestBody() async throws {
         let requestBody = LockedBox<Data?>(nil)
@@ -103,16 +129,51 @@ struct OpenAICompatibleClientTests {
         }
     }
 
-    @Test("redirect policy does not forward secrets to plaintext URLs")
+    @Test("redirect policy allows only the original scheme, host, and effective port")
     func redirectTransportPolicy() {
-        let keyed = SecureLLMRedirectDelegate(apiKey: "secret")
-        #expect(keyed.shouldFollowRedirect(to: URL(string: "https://example.com/v1")!))
-        #expect(!keyed.shouldFollowRedirect(to: URL(string: "http://localhost:11434/v1")!))
-        #expect(!keyed.shouldFollowRedirect(to: URL(string: "http://example.com/v1")!))
+        let original = URL(string: "https://example.com/v1/chat/completions")!
+        let delegate = SecureLLMRedirectDelegate(originalURL: original, apiKey: "secret")
+        #expect(delegate.shouldFollowRedirect(to: URL(string: "https://example.com/other")!))
+        #expect(delegate.shouldFollowRedirect(to: URL(string: "https://example.com:443/other")!))
+        #expect(!delegate.shouldFollowRedirect(to: URL(string: "https://other.example/v1")!))
+        #expect(!delegate.shouldFollowRedirect(to: URL(string: "https://example.com:444/v1")!))
+        #expect(!delegate.shouldFollowRedirect(to: URL(string: "http://example.com/v1")!))
+    }
 
-        let keyless = SecureLLMRedirectDelegate(apiKey: "")
-        #expect(keyless.shouldFollowRedirect(to: URL(string: "http://127.0.0.1:11434/v1")!))
-        #expect(!keyless.shouldFollowRedirect(to: URL(string: "http://example.com/v1")!))
+    @Test("307 and 308 cross-origin redirects are refused with body and Bearer intact")
+    func rejectsCrossOriginBodyPreservingRedirects() throws {
+        let original = URL(string: "https://example.com/v1/chat/completions")!
+        let destination = URL(string: "https://attacker.example/collect")!
+        let delegate = SecureLLMRedirectDelegate(originalURL: original, apiKey: "secret")
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: original)
+
+        for status in [307, 308] {
+            let response = try #require(HTTPURLResponse(
+                url: original,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Location": destination.absoluteString]
+            ))
+            var redirected = URLRequest(url: destination)
+            redirected.httpMethod = "POST"
+            redirected.setValue("Bearer private-api-key", forHTTPHeaderField: "Authorization")
+            redirected.httpBody = Data("private-message-body".utf8)
+            let callback = RedirectCallbackRecorder()
+
+            delegate.urlSession(
+                session,
+                task: task,
+                willPerformHTTPRedirection: response,
+                newRequest: redirected
+            ) { accepted in
+                callback.record(accepted)
+            }
+
+            #expect(callback.wasCalled)
+            #expect(callback.request == nil)
+        }
     }
 
     @Test("successful HTTP responses must declare an SSE content type")
@@ -366,6 +427,31 @@ private actor ConnectionProbeGate {
 
 private struct ConnectionProbeError: LocalizedError {
     var errorDescription: String? { "second failed" }
+}
+
+private final class RedirectCallbackRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var called = false
+    private var acceptedRequest: URLRequest?
+
+    var wasCalled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return called
+    }
+
+    var request: URLRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        return acceptedRequest
+    }
+
+    func record(_ request: URLRequest?) {
+        lock.lock()
+        defer { lock.unlock() }
+        called = true
+        acceptedRequest = request
+    }
 }
 
 private func requestBodyData(for request: URLRequest) -> Data? {

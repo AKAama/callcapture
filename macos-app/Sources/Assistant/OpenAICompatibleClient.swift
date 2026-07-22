@@ -58,7 +58,10 @@ struct OpenAICompatibleClient: Sendable {
                 do {
                     try configuration.validate()
                     let request = try makeRequest(messages: messages, configuration: configuration)
-                    let redirectDelegate = SecureLLMRedirectDelegate(apiKey: configuration.apiKey)
+                    let redirectDelegate = SecureLLMRedirectDelegate(
+                        originalURL: request.url!,
+                        apiKey: configuration.apiKey
+                    )
                     let (bytes, response) = try await session.bytes(
                         for: request,
                         delegate: redirectDelegate
@@ -162,38 +165,68 @@ struct OpenAICompatibleClient: Sendable {
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
         var line = Data()
+        var dataLines: [String] = []
         var sawDataEvent = false
+        var pendingCarriageReturn = false
+
+        func finishLine() throws -> Bool {
+            defer { line.removeAll(keepingCapacity: true) }
+            guard try collectDataField(from: line, into: &dataLines) else { return false }
+            guard !dataLines.isEmpty else { return false }
+
+            let payload = dataLines.joined(separator: "\n")
+            dataLines.removeAll(keepingCapacity: true)
+            sawDataEvent = true
+            return try consume(eventPayload: payload, continuation: continuation)
+        }
+
         for try await byte in bytes {
             try Task.checkCancellation()
-            if byte == 0x0A {
-                if let isDone = try consume(line: line, continuation: continuation) {
-                    sawDataEvent = true
-                    if isDone { return }
-                }
-                line.removeAll(keepingCapacity: true)
-            } else if byte != 0x0D {
+
+            if pendingCarriageReturn {
+                pendingCarriageReturn = false
+                if try finishLine() { return }
+                if byte == 0x0A { continue }
+            }
+
+            switch byte {
+            case 0x0D:
+                pendingCarriageReturn = true
+            case 0x0A:
+                if try finishLine() { return }
+            default:
                 line.append(byte)
             }
         }
-        if !line.isEmpty {
-            if try consume(line: line, continuation: continuation) != nil {
-                sawDataEvent = true
-            }
+
+        if pendingCarriageReturn, try finishLine() {
+            return
         }
         guard sawDataEvent else { throw OpenAICompatibleClientError.invalidResponse }
     }
 
-    /// Returns nil for a non-data SSE line, false for JSON data, and true for `[DONE]`.
-    private func consume(
-        line: Data,
-        continuation: AsyncThrowingStream<String, Error>.Continuation
-    ) throws -> Bool? {
+    /// Collects one SSE `data` field. Returns true only for a blank event delimiter.
+    private func collectDataField(from line: Data, into dataLines: inout [String]) throws -> Bool {
         guard let text = String(data: line, encoding: .utf8) else {
             throw OpenAICompatibleClientError.invalidResponse
         }
-        guard text.hasPrefix("data:") else { return nil }
-        let payload = text.dropFirst(5).trimmingCharacters(in: .whitespaces)
-        if payload == "[DONE]" { return true }
+        guard !text.isEmpty else { return true }
+        guard !text.hasPrefix(":") else { return false }
+
+        let pieces = text.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first == "data" else { return false }
+        var value = pieces.count == 2 ? String(pieces[1]) : ""
+        if value.first == " " { value.removeFirst() }
+        dataLines.append(value)
+        return false
+    }
+
+    /// Parses one fully framed SSE event. Returns true for terminal `[DONE]`.
+    private func consume(
+        eventPayload payload: String,
+        continuation: AsyncThrowingStream<String, Error>.Continuation
+    ) throws -> Bool {
+        if payload.trimmingCharacters(in: .whitespacesAndNewlines) == "[DONE]" { return true }
         guard !payload.isEmpty, let data = payload.data(using: .utf8) else {
             throw OpenAICompatibleClientError.invalidResponse
         }
@@ -231,14 +264,40 @@ struct OpenAICompatibleClient: Sendable {
 
 /// Applies the same transport rule to redirects as initial configuration validation.
 final class SecureLLMRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private struct Origin: Equatable, Sendable {
+        let scheme: String
+        let host: String
+        let port: Int
+
+        init?(_ url: URL) {
+            guard let scheme = url.scheme?.lowercased(),
+                  var host = url.host?.lowercased() else {
+                return nil
+            }
+            if host.hasSuffix(".") { host.removeLast() }
+            let defaultPort: Int
+            switch scheme {
+            case "https": defaultPort = 443
+            case "http": defaultPort = 80
+            default: return nil
+            }
+            self.scheme = scheme
+            self.host = host
+            self.port = url.port ?? defaultPort
+        }
+    }
+
+    private let originalOrigin: Origin?
     private let apiKey: String
 
-    init(apiKey: String) {
+    init(originalURL: URL, apiKey: String) {
+        originalOrigin = Origin(originalURL)
         self.apiKey = apiKey
     }
 
     func shouldFollowRedirect(to url: URL) -> Bool {
-        LLMConfiguration.isAllowedTransport(to: url, apiKey: apiKey)
+        guard let originalOrigin, Origin(url) == originalOrigin else { return false }
+        return LLMConfiguration.isAllowedTransport(to: url, apiKey: apiKey)
     }
 
     func urlSession(
