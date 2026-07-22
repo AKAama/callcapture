@@ -12,6 +12,7 @@ struct SettingsView: View {
             transcriptionSection(settings: settings)
             apiKeysSection(settings: settings)
             postProcessingSection(settings: settings)
+            meetingAssistantSection(settings: settings)
             pricingSection(settings: settings)
             speakerSection(settings: settings)
             exportSection(settings: settings)
@@ -128,6 +129,66 @@ struct SettingsView: View {
             }
 
             Toggle("Auto-process on stop", isOn: $settings.autoProcessOnStop)
+        }
+    }
+
+    @ViewBuilder
+    private func meetingAssistantSection(settings: SettingsManager) -> some View {
+        @Bindable var settings = settings
+        Section("Meeting Assistant") {
+            Picker("Provider", selection: $settings.assistantLLMPreset) {
+                ForEach(LLMProviderPreset.allCases, id: \.self) { preset in
+                    Text(preset.displayName).tag(preset)
+                }
+            }
+            .onChange(of: settings.assistantLLMPreset) { _, preset in
+                settings.applyAssistantLLMPreset(preset)
+            }
+
+            TextField("Base URL", text: $settings.assistantLLMBaseURL)
+                .textFieldStyle(.roundedBorder)
+            TextField("Model", text: $settings.assistantLLMModel)
+                .textFieldStyle(.roundedBorder)
+            SecureField(
+                settings.assistantLLMPreset.requiresAPIKey ? "API Key" : "API Key (optional)",
+                text: $settings.assistantLLMAPIKey
+            )
+            Text("The API key is stored in macOS Keychain. Local providers may leave it blank.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            LabeledContent("Timeout (seconds)") {
+                TextField("30", value: $settings.assistantLLMTimeout, format: .number)
+                    .frame(width: 90)
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Maximum output tokens") {
+                TextField("600", value: $settings.assistantLLMMaxTokens, format: .number)
+                    .frame(width: 90)
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Temperature") {
+                TextField("0.3", value: $settings.assistantLLMTemperature, format: .number)
+                    .frame(width: 90)
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Transcript context (seconds)") {
+                TextField("30", value: $settings.assistantContextDuration, format: .number)
+                    .frame(width: 90)
+                    .multilineTextAlignment(.trailing)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Default system prompt")
+                TextEditor(text: $settings.assistantSystemPrompt)
+                    .font(.body)
+                    .frame(minHeight: 72)
+                Text("Prompt text stays in memory and is cleared when the app exits.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            AssistantLLMConnectionTestRow(configuration: settings.assistantLLMConfiguration)
         }
     }
 
@@ -420,6 +481,72 @@ private struct OpenRouterTestRow: View {
         } catch {
             status = .failed(message: (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription)
+        }
+    }
+}
+
+/// Uses a fixed, transcript-free probe against the configured Chat Completions endpoint.
+@available(macOS 14.2, *)
+private struct AssistantLLMConnectionTestRow: View {
+    let configuration: LLMConfiguration
+
+    private enum Status: Equatable {
+        case idle
+        case testing
+        case connected
+        case failed(String)
+    }
+
+    @State private var status: Status = .idle
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button("Test Assistant Connection") {
+                    Task { await runTest() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(configuration.validationError != nil || status == .testing)
+
+                if status == .testing {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+            }
+
+            switch status {
+            case .idle:
+                if let error = configuration.validationError {
+                    Text(error.localizedDescription)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            case .testing:
+                Text("Sending a fixed, transcript-free probe…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .connected:
+                Label("Connected", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            case .failed(let message):
+                Label(message, systemImage: "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .onChange(of: configuration) { _, _ in status = .idle }
+    }
+
+    private func runTest() async {
+        status = .testing
+        do {
+            _ = try await OpenAICompatibleClient().testConnection(configuration: configuration)
+            status = .connected
+        } catch {
+            status = .failed((error as? LocalizedError)?.errorDescription
+                ?? "Connection failed.")
         }
     }
 }

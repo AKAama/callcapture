@@ -66,6 +66,59 @@ final class SettingsManager {
         didSet { persist("local_llm_base_url", localLLMBaseURL) }
     }
 
+    // MARK: - Real-time Meeting Assistant
+
+    var assistantLLMPreset: LLMProviderPreset = .openRouter {
+        didSet { persist("assistant_llm_preset", assistantLLMPreset.rawValue) }
+    }
+    var assistantLLMBaseURL: String = LLMProviderPreset.openRouter.defaultBaseURL {
+        didSet { persist("assistant_llm_base_url", assistantLLMBaseURL) }
+    }
+    var assistantLLMModel: String = LLMProviderPreset.openRouter.defaultModel {
+        didSet { persist("assistant_llm_model", assistantLLMModel) }
+    }
+    var assistantLLMAPIKey: String = "" {
+        didSet {
+            KeychainHelper.save(assistantLLMAPIKey, for: LLMConfiguration.keychainAccount)
+            persist("assistant_llm_api_key", "keychain")
+        }
+    }
+    var assistantLLMTimeout: Double = 30 {
+        didSet { persist("assistant_llm_timeout", String(assistantLLMTimeout)) }
+    }
+    var assistantLLMMaxTokens: Int = 600 {
+        didSet { persist("assistant_llm_max_tokens", String(assistantLLMMaxTokens)) }
+    }
+    var assistantLLMTemperature: Double = 0.3 {
+        didSet { persist("assistant_llm_temperature", String(assistantLLMTemperature)) }
+    }
+    /// Prompt text remains memory-only under the assistant privacy boundary.
+    var assistantSystemPrompt: String = SettingsManager.defaultAssistantSystemPrompt
+    var assistantContextDuration: Double = 30 {
+        didSet { persist("assistant_context_duration", String(assistantContextDuration)) }
+    }
+
+    var assistantLLMConfiguration: LLMConfiguration {
+        LLMConfiguration(
+            preset: assistantLLMPreset,
+            baseURL: assistantLLMBaseURL,
+            model: assistantLLMModel,
+            apiKey: assistantLLMAPIKey,
+            timeout: assistantLLMTimeout,
+            maxTokens: assistantLLMMaxTokens,
+            temperature: assistantLLMTemperature,
+            systemPrompt: assistantSystemPrompt,
+            contextDuration: assistantContextDuration
+        )
+    }
+
+    func applyAssistantLLMPreset(_ preset: LLMProviderPreset) {
+        assistantLLMPreset = preset
+        guard preset != .custom else { return }
+        assistantLLMBaseURL = preset.defaultBaseURL
+        assistantLLMModel = preset.defaultModel
+    }
+
     // MARK: - Pricing (USD). Defaults mirror python-worker/app/postprocess/pricing.py.
     var sttRateAssemblyAI: Double = 0.0035 { didSet { persist("stt_rate_assemblyai", String(sttRateAssemblyAI)) } }
     var sttRateDeepgram: Double = 0.0043 { didSet { persist("stt_rate_deepgram", String(sttRateDeepgram)) } }
@@ -106,6 +159,10 @@ final class SettingsManager {
         subsystem: "com.callcapture.app",
         category: "SettingsManager"
     )
+
+    private static let defaultAssistantSystemPrompt = """
+        Give concise, practical help for a live meeting. Offer a few useful ideas and, when helpful, a short phrase the user can say directly.
+        """
 
     /// Creates the settings manager and loads persisted values.
     ///
@@ -173,6 +230,13 @@ final class SettingsManager {
         if let raw = rows["llm_provider"], let val = LLMProvider(rawValue: raw) { llmProvider = val }
         if let raw = rows["llm_model"], !raw.isEmpty { llmModel = raw }
         if let raw = rows["local_llm_base_url"], !raw.isEmpty { localLLMBaseURL = raw }
+        if let raw = rows["assistant_llm_preset"], let val = LLMProviderPreset(rawValue: raw) { assistantLLMPreset = val }
+        if let raw = rows["assistant_llm_base_url"] { assistantLLMBaseURL = raw }
+        if let raw = rows["assistant_llm_model"] { assistantLLMModel = raw }
+        if let raw = rows["assistant_llm_timeout"], let val = Double(raw) { assistantLLMTimeout = val }
+        if let raw = rows["assistant_llm_max_tokens"], let val = Int(raw) { assistantLLMMaxTokens = val }
+        if let raw = rows["assistant_llm_temperature"], let val = Double(raw) { assistantLLMTemperature = val }
+        if let raw = rows["assistant_context_duration"], let val = Double(raw) { assistantContextDuration = val }
         if let raw = rows["stt_rate_assemblyai"], let v = Double(raw) { sttRateAssemblyAI = v }
         if let raw = rows["stt_rate_deepgram"], let v = Double(raw) { sttRateDeepgram = v }
         if let raw = rows["stt_rate_openai"], let v = Double(raw) { sttRateOpenAI = v }
@@ -185,6 +249,7 @@ final class SettingsManager {
         deepgramApiKey = KeychainHelper.load(for: "deepgram_api_key")
         llmApiKey = KeychainHelper.load(for: "llm_api_key")
         openRouterApiKey = KeychainHelper.load(for: "openrouter_api_key")
+        assistantLLMAPIKey = KeychainHelper.load(for: LLMConfiguration.keychainAccount)
 
         Self.logger.info("Settings loaded (\(rows.count) persisted keys)")
     }
