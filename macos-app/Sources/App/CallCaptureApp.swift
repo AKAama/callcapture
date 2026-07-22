@@ -1,5 +1,6 @@
-import SwiftUI
+import AppKit
 import OSLog
+import SwiftUI
 
 /// Application state representing the current recording lifecycle phase.
 enum AppState: String, Sendable {
@@ -79,14 +80,23 @@ final class AppModel {
     let captureManager: AudioCaptureManager
     let liveTranscriptStore: LiveTranscriptStore
     let liveMeetingCoordinator: LiveMeetingCoordinator
+    let subtitlePanelController: SubtitlePanelController
+    let meetingAssistant: MeetingAssistant
+    let assistantPanelController: AssistantPanelController
+    let globalShortcutManager: any GlobalShortcutManaging
     let sessionManager: SessionManager
     let settingsManager: SettingsManager
     let pythonBridge = PythonBridge()
     let diarizationService = DiarizationService(provider: FluidAudioDiarizer())
 
+    var subtitleMousePassthroughEnabled = false
+    var assistantShortcutError: String?
+
     /// The in-flight auto-transcription task, retained so the user can cancel it.
     @ObservationIgnored
     private var transcriptionTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var openSettingsAction: (() -> Void)?
 
     private static let logger = Logger(
         subsystem: "com.callcapture.app",
@@ -96,28 +106,111 @@ final class AppModel {
     /// Creates the app model backed by the given database.
     ///
     /// - Parameter database: The GRDB-backed application database.
-    init(database: AppDatabase) {
+    init(
+        database: AppDatabase,
+        globalShortcutManager: (any GlobalShortcutManaging)? = nil
+    ) {
         let captureManager = AudioCaptureManager()
         let liveTranscriptStore = LiveTranscriptStore()
-        self.captureManager = captureManager
-        self.liveTranscriptStore = liveTranscriptStore
-        self.liveMeetingCoordinator = LiveMeetingCoordinator(
+        let settingsManager = SettingsManager(database: database)
+        let liveMeetingCoordinator = LiveMeetingCoordinator(
             capture: captureManager,
             transcriptStore: liveTranscriptStore,
             transcriberFactory: { TencentLiveTranscriber() },
             configurationProvider: {
                 ASRConfiguration(
-                    appID: KeychainHelper.load(for: "tencent_asr_app_id"),
-                    secretID: KeychainHelper.load(for: "tencent_asr_secret_id"),
-                    secretKey: KeychainHelper.load(for: "tencent_asr_secret_key"),
+                    appID: settingsManager.tencentASRAppID,
+                    secretID: settingsManager.tencentASRSecretID,
+                    secretKey: settingsManager.tencentASRSecretKey,
                     voiceID: UUID().uuidString
                 )
             }
         )
+        let meetingAssistant = MeetingAssistant(
+            store: liveTranscriptStore,
+            configurationProvider: { settingsManager.assistantLLMConfiguration }
+        )
+
+        self.captureManager = captureManager
+        self.liveTranscriptStore = liveTranscriptStore
+        self.liveMeetingCoordinator = liveMeetingCoordinator
+        self.subtitlePanelController = SubtitlePanelController()
+        self.meetingAssistant = meetingAssistant
+        self.assistantPanelController = AssistantPanelController()
+        self.globalShortcutManager = globalShortcutManager ?? GlobalShortcutManager()
         self.sessionManager = SessionManager(database: database)
-        self.settingsManager = SettingsManager(database: database)
+        self.settingsManager = settingsManager
         AppModel.shared = self
-        refreshAudioDevices()
+    }
+
+    /// Installs process-wide controls after AppKit has finished launching.
+    func startRuntime() {
+        reconfigureAssistantShortcut()
+    }
+
+    func setOpenSettingsAction(_ action: @escaping () -> Void) {
+        openSettingsAction = action
+    }
+
+    func startLiveMeeting(process: AudioProcessInfo) async {
+        assistantPanelController.closeAndClear()
+        meetingAssistant.clear()
+        setSubtitleMousePassthrough(false)
+        showSubtitlePanel()
+        await liveMeetingCoordinator.start(process: process)
+    }
+
+    func stopLiveMeeting() async {
+        await liveMeetingCoordinator.stop()
+    }
+
+    func showSubtitlePanel() {
+        subtitlePanelController.show(
+            store: liveTranscriptStore,
+            coordinator: liveMeetingCoordinator,
+            onCloseAndClear: { [weak self] in
+                guard let self else { return }
+                self.subtitleMousePassthroughEnabled = false
+                self.assistantPanelController.closeAndClear()
+                self.meetingAssistant.clear()
+            },
+            onMousePassthroughChange: { [weak self] enabled in
+                self?.subtitleMousePassthroughEnabled = enabled
+            }
+        )
+    }
+
+    func setSubtitleMousePassthrough(_ enabled: Bool) {
+        subtitleMousePassthroughEnabled = enabled
+        subtitlePanelController.setMousePassthrough(enabled)
+    }
+
+    func showAssistantPanel(openSettings: (() -> Void)? = nil) {
+        if let openSettings { openSettingsAction = openSettings }
+        assistantPanelController.show(
+            assistant: meetingAssistant,
+            openSettings: { [weak self] in self?.openAssistantSettings() }
+        )
+    }
+
+    /// Replaces or removes the single Carbon registration. The manager also
+    /// unregisters internally before registration, making repeated settings
+    /// changes and partial failures idempotent.
+    func reconfigureAssistantShortcut() {
+        globalShortcutManager.unregister()
+        assistantShortcutError = nil
+        guard settingsManager.assistantShortcutEnabled else { return }
+
+        let preset = settingsManager.assistantShortcutPreset
+        do {
+            try globalShortcutManager.register(
+                keyCode: preset.keyCode,
+                modifiers: preset.modifiers,
+                handler: { [weak self] in self?.showAssistantPanel() }
+            )
+        } catch {
+            assistantShortcutError = error.localizedDescription
+        }
     }
 
     /// Reloads the available input/output devices from the system and prunes
@@ -142,6 +235,10 @@ final class AppModel {
     /// Synchronously releases audio capture and any running worker process.
     /// Called from `AppDelegate` on app termination and catchable signals.
     func teardownForExit() {
+        globalShortcutManager.unregister()
+        assistantPanelController.closeAndClear()
+        meetingAssistant.clear()
+        subtitlePanelController.closeAndClear()
         liveMeetingCoordinator.shutdown()
         transcriptionTask?.cancel()
         pythonBridge.cancelCurrentJob()
@@ -159,11 +256,23 @@ final class AppModel {
     }
 
     var menuBarIconName: String {
-        switch state {
-        case .idle: "waveform.circle"
-        case .recording: "waveform.circle.fill"
-        case .transcribing: "ellipsis.circle"
+        switch liveMeetingCoordinator.state {
+        case .idle, .review: "captions.bubble"
+        case .connecting, .reconnecting: "ellipsis.circle"
+        case .live: "captions.bubble.fill"
         case .error: "exclamationmark.circle"
+        }
+    }
+
+    private func openAssistantSettings() {
+        if let openSettingsAction {
+            openSettingsAction()
+            return
+        }
+
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        if let window = NSApplication.shared.windows.first(where: { $0.title == "Settings" }) {
+            window.makeKeyAndOrderFront(nil)
         }
     }
 

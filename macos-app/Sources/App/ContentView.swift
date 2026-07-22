@@ -1,10 +1,50 @@
-import SwiftUI
 import AppKit
-import OSLog
+import SwiftUI
 
-/// Main popover content displayed from the menu bar icon.
-/// Shows recording status, control button, last session info,
-/// and a link to the diagnostics window.
+enum RealtimeMeetingPrimaryAction: Equatable {
+    case start
+    case startNewMeeting
+    case stop
+}
+
+/// Pure presentation derived from the coordinator's single source of truth.
+struct RealtimeMeetingPresentation: Equatable {
+    let state: LiveConnectionState
+
+    var primaryAction: RealtimeMeetingPrimaryAction {
+        switch state {
+        case .connecting, .live, .reconnecting: .stop
+        case .review: .startNewMeeting
+        case .idle, .error: .start
+        }
+    }
+
+    var statusText: String {
+        switch state {
+        case .idle: "准备就绪"
+        case .connecting: "正在连接…"
+        case .live: "实时字幕"
+        case .reconnecting: "正在重连…"
+        case .review: "字幕可查看"
+        case .error: "连接已中断"
+        }
+    }
+
+    var statusColor: Color {
+        switch state {
+        case .live: .green
+        case .connecting, .reconnecting: .orange
+        case .error: .red
+        case .idle, .review: .secondary
+        }
+    }
+}
+
+enum RealtimePrivacy {
+    static let notice = "所选应用音频会发送到腾讯云 ASR；只有手动提交时，最近 30 秒字幕才会发送到所配置的 LLM；内容不会保存到本地"
+}
+
+/// Compact production control surface for the memory-only realtime flow.
 @available(macOS 14.2, *)
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
@@ -12,205 +52,165 @@ struct ContentView: View {
     @State private var audioProcesses: [AudioProcessInfo] = []
     @State private var selectedProcessPID: pid_t?
 
-    private static let logger = Logger(
-        subsystem: "com.callcapture.app",
-        category: "ContentView"
-    )
-
-    /// Opens a window scene and brings the app to the foreground.
-    ///
-    /// A menu bar (`LSUIElement`) app is not the active application, so
-    /// `openWindow` alone creates the window *behind* other apps with no
-    /// focus — it looks like nothing happened. Activating fixes that.
-    private func showWindow(_ id: String) {
-        Self.logger.info("Opening window '\(id)'")
-        openWindow(id: id)
-        NSApplication.shared.activate(ignoringOtherApps: true)
+    private var presentation: RealtimeMeetingPresentation {
+        RealtimeMeetingPresentation(state: appModel.liveMeetingCoordinator.state)
     }
 
     var body: some View {
-        @Bindable var appModel = appModel
-        return VStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             statusHeader
-            if appModel.state == .idle || appModel.state == .error {
-                devicePickers(appModel: appModel)
-            }
-            recordButton
-            transcriptionProgress
-            lastSessionInfo
+            processPicker
+            privacyNotice
+            primaryButton
+            qualityAndErrorStatus
             Divider()
-            sessionsButton
+            overlayControls
             settingsButton
-            diagnosticsButton
             Divider()
             quitButton
         }
         .padding()
-        .frame(width: 280)
+        .frame(width: 340)
         .onAppear {
-            appModel.refreshAudioDevices()
             refreshAudioProcesses()
+            appModel.setOpenSettingsAction(showSettings)
         }
     }
+}
 
-    /// Recording type, meeting app, and microphone selection before recording.
-    @ViewBuilder
-    private func devicePickers(appModel: AppModel) -> some View {
-        @Bindable var appModel = appModel
-        VStack(spacing: 6) {
-            Picker("Type", selection: $appModel.selectedRecordingType) {
-                ForEach(RecordingType.allCases) { type in
-                    Text(type.displayName).tag(type)
-                }
-            }
-            HStack {
-                if audioProcesses.isEmpty {
-                    Text("未发现可捕获应用")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Picker("Meeting App", selection: $selectedProcessPID) {
-                        Text("Select an application").tag(pid_t?.none)
-                        ForEach(audioProcesses) { process in
-                            Text(process.name).tag(pid_t?.some(process.pid))
-                        }
-                    }
-                }
-                Button(action: refreshAudioProcesses) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh capturable applications")
-            }
-            Picker("Mic", selection: $appModel.selectedMicUID) {
-                Text("None").tag(String?.none)
-                ForEach(appModel.inputDevices) { device in
-                    Text(device.name).tag(String?.some(device.uid))
-                }
-            }
-        }
-        .pickerStyle(.menu)
-        .font(.caption)
-    }
-
-    @ViewBuilder
-    private var statusHeader: some View {
-        HStack {
+@available(macOS 14.2, *)
+private extension ContentView {
+    var statusHeader: some View {
+        HStack(spacing: 9) {
             Image(systemName: appModel.menuBarIconName)
                 .font(.title2)
-                .foregroundStyle(statusColor)
-            Text(statusText)
-                .font(.headline)
+                .foregroundStyle(presentation.statusColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(presentation.statusText)
+                    .font(.headline)
+                Text("仅捕获所选应用，不使用麦克风")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
         }
     }
 
-    @ViewBuilder
-    private var recordButton: some View {
+    var processPicker: some View {
+        HStack(spacing: 8) {
+            if audioProcesses.isEmpty {
+                Text("未发现可捕获应用")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Picker("会议应用", selection: $selectedProcessPID) {
+                    Text("选择应用").tag(pid_t?.none)
+                    ForEach(audioProcesses) { process in
+                        Text(process.name).tag(pid_t?.some(process.pid))
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(presentation.primaryAction == .stop)
+            }
+
+            Button(action: refreshAudioProcesses) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .disabled(presentation.primaryAction == .stop)
+            .help("刷新可捕获应用")
+        }
+    }
+
+    var privacyNotice: some View {
+        Text(RealtimePrivacy.notice)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(10)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    var primaryButton: some View {
         Button {
-            Task { await appModel.toggleRecording() }
+            Task {
+                switch presentation.primaryAction {
+                case .stop:
+                    await appModel.stopLiveMeeting()
+                case .start, .startNewMeeting:
+                    guard let selectedProcess else { return }
+                    await appModel.startLiveMeeting(process: selectedProcess)
+                }
+            }
         } label: {
-            Label(
-                appModel.state == .recording ? "Stop Recording" : "Start Recording",
-                systemImage: appModel.state == .recording ? "stop.circle.fill" : "record.circle"
-            )
-            .frame(maxWidth: .infinity)
+            Label(primaryButtonTitle, systemImage: primaryButtonIcon)
+                .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
-        .tint(appModel.state == .recording ? .red : .accentColor)
-        .disabled(recordButtonDisabled)
+        .tint(presentation.primaryAction == .stop ? .red : .accentColor)
+        .disabled(presentation.primaryAction != .stop && selectedProcess == nil)
     }
 
     @ViewBuilder
-    private var lastSessionInfo: some View {
-        if let title = appModel.lastSessionTitle,
-           let date = appModel.lastSessionDate {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Last Session")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(title)
-                    .font(.subheadline)
-                // Static recorded-at time + fixed duration. Do NOT use
-                // `style: .relative` here — it auto-ticks every second and
-                // reads as a recording timer that never stopped.
-                Text(lastSessionSubtitle(date: date))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-
-        if let error = appModel.lastError, appModel.state == .error {
+    var qualityAndErrorStatus: some View {
+        if let error = appModel.liveMeetingCoordinator.lastError {
             Label(error, systemImage: "exclamationmark.triangle")
                 .font(.caption)
                 .foregroundStyle(.red)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if appModel.liveMeetingCoordinator.droppedChunkCount > 0 {
+            Label(
+                "音频处理繁忙，已丢弃 \(appModel.liveMeetingCoordinator.droppedChunkCount) 个数据块。",
+                systemImage: "waveform.badge.exclamationmark"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
         }
     }
 
-    @ViewBuilder
-    private var transcriptionProgress: some View {
-        if appModel.state == .transcribing {
-            VStack(spacing: 8) {
-                ProgressView(value: appModel.pythonBridge.progress)
-                    .progressViewStyle(.linear)
-                Text("Transcribing...")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Button(role: .cancel) {
-                    appModel.cancelTranscription()
+    var overlayControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                appModel.showSubtitlePanel()
+            } label: {
+                Label("显示字幕窗口", systemImage: "captions.bubble")
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                appModel.showAssistantPanel(openSettings: showSettings)
+            } label: {
+                Label("打开会议助手", systemImage: "sparkles")
+            }
+            .buttonStyle(.plain)
+
+            if appModel.subtitleMousePassthroughEnabled {
+                Button {
+                    appModel.setSubtitleMousePassthrough(false)
                 } label: {
-                    Label("Cancel", systemImage: "xmark.circle")
-                        .frame(maxWidth: .infinity)
+                    Label("解锁字幕窗口鼠标操作", systemImage: "lock.open")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
             }
         }
+        .font(.subheadline)
     }
 
-    @ViewBuilder
-    private var sessionsButton: some View {
-        Button {
-            showWindow("sessions")
-        } label: {
-            Label("View Sessions", systemImage: "list.bullet.rectangle")
+    var settingsButton: some View {
+        Button(action: showSettings) {
+            Label("设置", systemImage: "gear")
                 .font(.subheadline)
         }
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
-    private var settingsButton: some View {
+    var quitButton: some View {
         Button {
-            showWindow("settings")
-        } label: {
-            Label("Settings", systemImage: "gear")
-                .font(.subheadline)
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private var diagnosticsButton: some View {
-        Button {
-            showWindow("diagnostics")
-        } label: {
-            Label("Diagnostics", systemImage: "stethoscope")
-                .font(.subheadline)
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private var quitButton: some View {
-        Button {
-            Self.logger.info("Quit requested from popover")
-            // Triggers applicationWillTerminate -> teardownForExit, which
-            // releases audio capture and any running worker process.
             NSApplication.shared.terminate(nil)
         } label: {
-            Label("Quit CallCapture", systemImage: "power")
+            Label("退出 CallCapture", systemImage: "power")
                 .font(.subheadline)
                 .foregroundStyle(.red)
         }
@@ -218,56 +218,34 @@ struct ContentView: View {
         .keyboardShortcut("q", modifiers: .command)
     }
 
-    /// Static subtitle for the last session: recorded time + fixed duration.
-    private func lastSessionSubtitle(date: Date) -> String {
-        let time = date.formatted(date: .omitted, time: .shortened)
-        if let duration = appModel.lastSessionDuration {
-            return "Recorded \(time) · \(formattedDuration(duration))"
-        }
-        return "Recorded \(time)"
+    var selectedProcess: AudioProcessInfo? {
+        guard let selectedProcessPID else { return nil }
+        return audioProcesses.first { $0.pid == selectedProcessPID }
     }
 
-    private func formattedDuration(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-
-    private var statusColor: Color {
-        switch appModel.state {
-        case .idle: .secondary
-        case .recording: .red
-        case .transcribing: .orange
-        case .error: .red
+    var primaryButtonTitle: String {
+        switch presentation.primaryAction {
+        case .start: "开始实时字幕"
+        case .startNewMeeting: "开始新会议"
+        case .stop: "停止并查看字幕"
         }
     }
 
-    private var statusText: String {
-        switch appModel.state {
-        case .idle: "Ready"
-        case .recording: "Recording..."
-        case .transcribing: "Transcribing..."
-        case .error: "Error"
-        }
+    var primaryButtonIcon: String {
+        presentation.primaryAction == .stop ? "stop.circle.fill" : "play.circle.fill"
     }
 
-    /// Reloads capturable apps while keeping a selection whose PID still exists.
-    private func refreshAudioProcesses() {
-        let refreshedProcesses = AudioProcessEnumerator.processes()
-        audioProcesses = refreshedProcesses
-
+    func refreshAudioProcesses() {
+        let refreshed = AudioProcessEnumerator.processes()
+        audioProcesses = refreshed
         if let selectedProcessPID,
-           !refreshedProcesses.contains(where: { $0.pid == selectedProcessPID }) {
+           !refreshed.contains(where: { $0.pid == selectedProcessPID }) {
             self.selectedProcessPID = nil
         }
     }
 
-    private var recordButtonDisabled: Bool {
-        if appModel.state == .transcribing {
-            return true
-        }
-        if appModel.state == .recording {
-            return false
-        }
-        return selectedProcessPID == nil
+    func showSettings() {
+        openWindow(id: "settings")
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }

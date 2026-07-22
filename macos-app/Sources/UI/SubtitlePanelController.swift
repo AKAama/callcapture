@@ -15,11 +15,20 @@ final class SubtitlePanelController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private weak var store: LiveTranscriptStore?
     private weak var coordinator: LiveMeetingCoordinator?
+    private var onCloseAndClear: (() -> Void)?
+    private var onMousePassthroughChange: ((Bool) -> Void)?
 
     /// Displays (or refreshes) the single subtitle panel for a live meeting.
-    func show(store: LiveTranscriptStore, coordinator: LiveMeetingCoordinator) {
+    func show(
+        store: LiveTranscriptStore,
+        coordinator: LiveMeetingCoordinator,
+        onCloseAndClear: @escaping () -> Void = {},
+        onMousePassthroughChange: @escaping (Bool) -> Void = { _ in }
+    ) {
         self.store = store
         self.coordinator = coordinator
+        self.onCloseAndClear = onCloseAndClear
+        self.onMousePassthroughChange = onMousePassthroughChange
 
         let rootView = LiveSubtitleView(
             store: store,
@@ -73,12 +82,14 @@ final class SubtitlePanelController: NSObject, NSWindowDelegate {
     func setMousePassthrough(_ enabled: Bool) {
         settings.isMousePassthrough = enabled
         panel?.ignoresMouseEvents = enabled
+        onMousePassthroughChange?(enabled)
     }
 
     /// Immediately hides the panel, then asks the coordinator to cancel all
     /// live work and clear the in-memory transcript.
     func closeAndClear() {
         let coordinator = coordinator
+        let onCloseAndClear = onCloseAndClear
 
         panel?.orderOut(nil)
         panel?.contentView = nil
@@ -86,7 +97,10 @@ final class SubtitlePanelController: NSObject, NSWindowDelegate {
         panel = nil
         store = nil
         self.coordinator = nil
+        self.onCloseAndClear = nil
+        onMousePassthroughChange = nil
         settings.isMousePassthrough = false
+        onCloseAndClear?()
 
         Task { @MainActor in
             await coordinator?.clearAndClose()

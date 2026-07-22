@@ -1,6 +1,46 @@
 import Carbon
 import Foundation
 
+@MainActor
+protocol GlobalShortcutManaging: AnyObject {
+    func register(
+        keyCode: UInt32,
+        modifiers: UInt32,
+        handler: @escaping @MainActor @Sendable () -> Void
+    ) throws
+    func unregister()
+}
+
+/// User-facing shortcut choices kept intentionally small so every saved value
+/// can be registered deterministically with Carbon.
+enum AssistantShortcutPreset: String, CaseIterable, Identifiable, Sendable {
+    case optionSpace = "option_space"
+    case controlOptionSpace = "control_option_space"
+    case commandOptionSpace = "command_option_space"
+
+    static let `default`: Self = .optionSpace
+
+    var id: Self { self }
+
+    var displayName: String {
+        switch self {
+        case .optionSpace: "⌥Space"
+        case .controlOptionSpace: "⌃⌥Space"
+        case .commandOptionSpace: "⌘⌥Space"
+        }
+    }
+
+    var keyCode: UInt32 { UInt32(kVK_Space) }
+
+    var modifiers: UInt32 {
+        switch self {
+        case .optionSpace: UInt32(optionKey)
+        case .controlOptionSpace: UInt32(controlKey | optionKey)
+        case .commandOptionSpace: UInt32(cmdKey | optionKey)
+        }
+    }
+}
+
 enum GlobalShortcutError: Error, Equatable, LocalizedError {
     case eventHandlerRegistrationFailed(OSStatus)
     case hotKeyRegistrationFailed(OSStatus)
@@ -19,8 +59,8 @@ enum GlobalShortcutError: Error, Equatable, LocalizedError {
 /// Reconfiguration always unregisters the previous shortcut first.
 @MainActor
 final class GlobalShortcutManager {
-    nonisolated static let defaultKeyCode = UInt32(kVK_Space)
-    nonisolated static let defaultModifiers = UInt32(optionKey)
+    nonisolated static let defaultKeyCode = AssistantShortcutPreset.default.keyCode
+    nonisolated static let defaultModifiers = AssistantShortcutPreset.default.modifiers
 
     nonisolated private static let signature: OSType = 0x4343_4153 // "CCAS"
     nonisolated private static let identifier: UInt32 = 1
@@ -117,3 +157,5 @@ final class GlobalShortcutManager {
         handler?()
     }
 }
+
+extension GlobalShortcutManager: GlobalShortcutManaging {}

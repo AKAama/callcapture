@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if terminateIfDuplicateInstance() { return }
+        AppModel.shared?.startRuntime()
         installSignalHandlers()
         Self.logger.info("AppDelegate launched (single instance confirmed)")
     }

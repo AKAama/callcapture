@@ -9,13 +9,10 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var settings = appModel.settingsManager
         Form {
-            transcriptionSection(settings: settings)
-            apiKeysSection(settings: settings)
-            postProcessingSection(settings: settings)
+            realtimeASRSection(settings: settings)
             meetingAssistantSection(settings: settings)
-            pricingSection(settings: settings)
-            speakerSection(settings: settings)
-            exportSection(settings: settings)
+            assistantShortcutSection(settings: settings)
+            realtimePrivacySection
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, minHeight: 520)
@@ -23,6 +20,19 @@ struct SettingsView: View {
     }
 
     // MARK: - Sections
+
+    @ViewBuilder
+    private func realtimeASRSection(settings: SettingsManager) -> some View {
+        @Bindable var settings = settings
+        Section("腾讯云实时字幕") {
+            SecureField("App ID", text: $settings.tencentASRAppID)
+            SecureField("Secret ID", text: $settings.tencentASRSecretID)
+            SecureField("Secret Key", text: $settings.tencentASRSecretKey)
+            Text("凭证保存在 macOS Keychain。每场会议只会把所选应用的内存音频流发送到腾讯云 ASR。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
 
     @ViewBuilder
     private func transcriptionSection(settings: SettingsManager) -> some View {
@@ -172,10 +182,9 @@ struct SettingsView: View {
                     .frame(width: 90)
                     .multilineTextAlignment(.trailing)
             }
-            LabeledContent("Transcript context (seconds)") {
-                TextField("30", value: $settings.assistantContextDuration, format: .number)
-                    .frame(width: 90)
-                    .multilineTextAlignment(.trailing)
+            LabeledContent("Transcript context") {
+                Text("30 seconds")
+                    .foregroundStyle(.secondary)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -189,6 +198,47 @@ struct SettingsView: View {
             }
 
             AssistantLLMConnectionTestRow(configuration: settings.assistantLLMConfiguration)
+        }
+    }
+
+    @ViewBuilder
+    private func assistantShortcutSection(settings: SettingsManager) -> some View {
+        @Bindable var settings = settings
+        Section("助手快捷键") {
+            Toggle("启用全局快捷键", isOn: $settings.assistantShortcutEnabled)
+                .onChange(of: settings.assistantShortcutEnabled) { _, _ in
+                    appModel.reconfigureAssistantShortcut()
+                }
+
+            Picker("快捷键", selection: $settings.assistantShortcutPreset) {
+                ForEach(AssistantShortcutPreset.allCases) { preset in
+                    Text(preset.displayName).tag(preset)
+                }
+            }
+            .disabled(!settings.assistantShortcutEnabled)
+            .onChange(of: settings.assistantShortcutPreset) { _, _ in
+                appModel.reconfigureAssistantShortcut()
+            }
+
+            Text("默认使用 ⌥Space。重新配置或关闭此选项时，旧快捷键会立即注销。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let error = appModel.assistantShortcutError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private var realtimePrivacySection: some View {
+        Section("隐私") {
+            Text(RealtimePrivacy.notice)
+                .font(.caption)
+            Text("字幕、发送内容和模型回复只保存在内存中；开始新会议、清空字幕或退出应用时会清除。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

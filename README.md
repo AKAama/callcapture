@@ -3,100 +3,84 @@
 [![CI](https://github.com/bodharma/callcapture/actions/workflows/ci.yml/badge.svg)](https://github.com/bodharma/callcapture/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Platform: macOS 14.2+](https://img.shields.io/badge/platform-macOS%2014.2%2B-lightgrey)](https://www.apple.com/macos/)
-[![Release](https://img.shields.io/github/v/release/bodharma/callcapture?include_prereleases&sort=semver)](https://github.com/bodharma/callcapture/releases)
 
-**Private, local-first call & meeting recording for macOS.** Capture system audio from any call (Google Meet, Zoom, Teams, or anything that plays through your speakers), transcribe it, separate who said what, and turn it into clean Markdown notes — without a bot joining your meeting and without your audio leaving your machine unless you choose a cloud transcription engine.
+**A realtime meeting subtitle overlay and opt-in 30-second assistant for macOS.** Choose one running meeting app, see its remote audio as live speaker-labelled subtitles, and manually ask an OpenAI-compatible LLM for concise meeting help.
 
-> A local alternative to Fathom/Otter-style meeting recorders. No meeting bot, no mandatory cloud, no "who invited the notetaker?" — it captures the audio already playing on your Mac.
+CallCapture uses a Core Audio process tap, so it captures only the application the user selects. It does not join the meeting as a bot and the realtime flow never opens the microphone.
 
----
+## Realtime flow
 
-## Why
+1. Open CallCapture from the menu bar and choose the meeting application.
+2. Configure Tencent Cloud realtime ASR credentials in **Settings**.
+3. Start realtime subtitles. A non-activating overlay follows the ASR connection state and remains available in review mode after stopping.
+4. Open the meeting assistant from the menu or with **⌥Space**. Choose an instruction, inspect or edit the selected context, then explicitly send it.
+5. Clear the subtitle window, start another meeting, or quit the app to erase transcript and assistant memory.
 
-Hosted meeting recorders join your call as a visible bot and upload everything to their servers. CallCapture instead taps the audio your Mac is already producing (via Core Audio process taps, macOS 14.2+), so:
-
-- **No bot** appears in the meeting.
-- **Local by default** — on-device Whisper transcription means audio never leaves your machine. Cloud engines are opt-in.
-- **You own the data** — recordings, transcripts, notes, and the session database all live in your local Application Support folder.
+The subtitle overlay can be resized, moved, adjusted for type size and opacity, or locked into mouse-passthrough mode. When locked, reopen the menu-bar popover and choose **解锁字幕窗口鼠标操作**.
 
 ## Features
 
-- 🎙️ **System-audio capture** — records call audio via Core Audio process taps; optional microphone capture mixed in.
-- 🧑‍🤝‍🧑 **Speaker separation** — captures your mic and the remote side as separate stems and attributes turns with on-device diarization (FluidAudio), so transcripts read *You:* / *Speaker 1:* instead of one wall of text.
-- 📝 **Transcription** — on-device **Whisper** (`pywhispercpp`) or cloud engines (**AssemblyAI**, **Deepgram Nova-3**) with automatic per-language routing.
-- 🌍 **Multi-language** — broad language support with per-recording spoken language and a separate **output/notes language**.
-- 🧠 **Conversation insights** — sentiment, acoustic emotion, key points, and action items via an LLM post-processing pass (OpenRouter or a local model).
-- 🗒️ **Markdown notes** — meeting-notes / transcript / Obsidian export profiles, with one-click "Save to Vault."
-- 🪶 **Menu-bar app** — lightweight, stays out of the way.
-
-## Screenshots
-
-**Session detail** — transcript with speaker attribution (*You* / *Speaker 1*), the generated Markdown note, and conversation insights (sentiment per speaker, emotional arc, recommended actions, action items):
-
-![CallCapture session detail with conversation insights](docs/images/session-insights.png)
-
-**Settings** — pick a transcription engine (on-device Whisper or cloud), per-language provider routing, LLM post-processing, on-device diarization & emotion models, and export to an Obsidian vault:
-
-![CallCapture Settings](docs/images/settings.png)
+- **Application-scoped capture** — captures one selected process rather than system-wide audio.
+- **No microphone** — the realtime path never requests or mixes microphone input.
+- **Live bilingual ASR** — streams 16 kHz mono PCM to Tencent Cloud's Chinese/English speaker-mode WebSocket API.
+- **Speaker-labelled overlay** — shows recent confirmed and partial subtitles without taking meeting focus.
+- **Review mode** — stops capture while keeping confirmed subtitles in memory for copying or assistant use.
+- **Manual meeting assistant** — selects confirmed subtitles from the latest 30-second window, then lets the user edit the exact text before sending.
+- **Configurable OpenAI-compatible LLM** — OpenAI, OpenRouter, DeepSeek, Ollama, and custom endpoint presets with streaming replies.
+- **Global shortcut** — defaults to ⌥Space and can be replaced or disabled in Settings.
 
 ## Architecture
 
-CallCapture is two cooperating pieces:
+The production menu flow is memory-only:
 
-| Component | Tech | Role |
-|-----------|------|------|
-| **macOS app** (`macos-app/`) | Swift, SwiftUI, Core Audio, GRDB | Menu-bar UI, audio capture, on-device diarization, session database, settings |
-| **Python worker** (`python-worker/`) | Python 3.11+, Pydantic, Click | Transcription + analysis pipeline; invoked per job over stdin/stdout JSON |
+```text
+Selected meeting process
+  → Core Audio process tap
+  → bounded in-memory PCM queue
+  → Tencent realtime ASR
+  → LiveTranscriptStore
+      ├─ floating subtitle panel
+      └─ explicit 30-second assistant composition
+           → configured OpenAI-compatible LLM
+```
 
-The app spawns the worker as a subprocess, sends a `JobRequest` on stdin, and reads progress + a `JobResult` back. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the full data flow and build instructions.
+Capture, ASR, subtitles, and LLM generation have separate lifecycles. An LLM cancellation, timeout, authentication failure, rate limit, or malformed stream updates only the assistant panel; it cannot stop capture or ASR.
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for implementation details, verification commands, and the pending desktop-validation checklist.
 
 ## Requirements
 
-- macOS **14.2** or later (Core Audio process taps)
-- Apple Silicon recommended
-- Python **3.11+** (for the worker)
-- API keys only if you opt into cloud engines (AssemblyAI / Deepgram for transcription, OpenRouter for LLM notes) — stored in the macOS Keychain, never in the repo.
+- macOS **14.2** or later
+- Tencent Cloud realtime ASR App ID, Secret ID, and Secret Key
+- An API key for cloud LLM presets; keyless loopback Ollama/custom endpoints are supported
 
-### Install (Homebrew)
+Credentials are stored in the macOS Keychain. Non-sensitive endpoint, model, timeout, and shortcut preferences are stored in the app settings database.
 
-```bash
-brew tap bodharma/callcapture
-brew install --cask callcapture
-
-# update to the latest release later:
-brew upgrade --cask callcapture
-```
-
-Notarized by Apple — it opens with a normal double-click, no Gatekeeper bypass.
-
-> The packaged app uses **cloud transcription** (AssemblyAI / Deepgram) plus full
-> on-device analysis (diarization, sentiment, emotion, insights). **On-device
-> Whisper** is available in source builds only for now — see
-> [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
-## Quick start (from source)
+## Build from source
 
 ```bash
 git clone https://github.com/bodharma/callcapture.git
 cd callcapture
 
-# Python worker
-cd python-worker
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cd ..
+# First bundle build (includes Info.plist, signing entitlements, and worker resources)
+./macos-app/Scripts/build-app.sh
+open macos-app/.build/CallCapture.app
 
-# Build + launch the app in dev mode (builds Swift, bundles, launches)
+# After later Swift-only edits, rebuild/re-sign/relaunch the existing bundle
 ./run-dev.sh
 ```
 
-A waveform icon appears in the menu bar. Start a call, hit record, stop, and let it transcribe. Configure engine, languages, API keys, and export folders in **Settings**.
+Do not use the bare `swift run` executable for desktop validation: it is not an app bundle and does not carry the process-audio usage description or signing entitlements. The bundled app appears in the macOS menu bar; grant the process-audio capture permission requested by macOS, then select the running meeting application.
 
 ## Privacy
 
-- On-device Whisper keeps audio fully local.
-- Cloud engines (AssemblyAI, Deepgram, OpenRouter) upload audio/transcript only when you select them.
-- API keys live in the macOS Keychain. Recordings and the session DB stay in `~/Library/Application Support/CallCapture/` and are git-ignored.
+> 所选应用音频会发送到腾讯云 ASR；只有手动提交时，最近 30 秒字幕才会发送到所配置的 LLM；内容不会保存到本地
+
+- Audio is held in a bounded memory queue and is not written to a recording file.
+- Partial and confirmed subtitles, editable requests, and replies remain in memory only.
+- The LLM receives nothing when the assistant opens or composes; network access begins only after the user clicks send.
+- Starting a new meeting, clearing the subtitle window, or quitting clears transcript and assistant content.
+- Logs must not contain audio, transcript text, prompts, replies, credentials, or signed request URLs.
 
 ## License
 
@@ -104,4 +88,4 @@ A waveform icon appears in the menu bar. Start a call, hit record, stop, and let
 
 ## Contributing
 
-Issues and PRs welcome. Start with [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for architecture, build, and test workflows.
+Issues and PRs are welcome. Start with [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for architecture, build, testing, and manual verification guidance.

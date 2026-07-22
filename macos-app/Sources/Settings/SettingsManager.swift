@@ -10,6 +10,10 @@ import OSLog
 @Observable
 final class SettingsManager {
 
+    static let tencentASRAppIDAccount = "tencent_asr_app_id"
+    static let tencentASRSecretIDAccount = "tencent_asr_secret_id"
+    static let tencentASRSecretKeyAccount = "tencent_asr_secret_key"
+
     var defaultEngine: TranscriptionEngine = .localWhisper { didSet { persist("default_engine", defaultEngine.rawValue) } }
     var whisperModel: WhisperModel = .base { didSet { persist("whisper_model", whisperModel.rawValue) } }
     var remoteProvider: RemoteProvider = .groq { didSet { persist("remote_provider", remoteProvider.rawValue) } }
@@ -63,6 +67,29 @@ final class SettingsManager {
 
     // MARK: - Real-time Meeting Assistant
 
+    var tencentASRAppID: String = "" {
+        didSet {
+            saveSecretIfReady(tencentASRAppID, for: Self.tencentASRAppIDAccount)
+        }
+    }
+    var tencentASRSecretID: String = "" {
+        didSet {
+            saveSecretIfReady(tencentASRSecretID, for: Self.tencentASRSecretIDAccount)
+        }
+    }
+    var tencentASRSecretKey: String = "" {
+        didSet {
+            saveSecretIfReady(tencentASRSecretKey, for: Self.tencentASRSecretKeyAccount)
+        }
+    }
+
+    var assistantShortcutEnabled: Bool = true {
+        didSet { persist("assistant_shortcut_enabled", String(assistantShortcutEnabled)) }
+    }
+    var assistantShortcutPreset: AssistantShortcutPreset = .default {
+        didSet { persist("assistant_shortcut_preset", assistantShortcutPreset.rawValue) }
+    }
+
     var assistantLLMPreset: LLMProviderPreset = .openRouter {
         didSet { persist("assistant_llm_preset", assistantLLMPreset.rawValue) }
     }
@@ -88,9 +115,6 @@ final class SettingsManager {
     }
     /// Prompt text remains memory-only under the assistant privacy boundary.
     var assistantSystemPrompt: String = SettingsManager.defaultAssistantSystemPrompt
-    var assistantContextDuration: Double = 30 {
-        didSet { persist("assistant_context_duration", String(assistantContextDuration)) }
-    }
 
     var assistantLLMConfiguration: LLMConfiguration {
         LLMConfiguration(
@@ -102,7 +126,7 @@ final class SettingsManager {
             maxTokens: assistantLLMMaxTokens,
             temperature: assistantLLMTemperature,
             systemPrompt: assistantSystemPrompt,
-            contextDuration: assistantContextDuration
+            contextDuration: MeetingAssistant.defaultContextDuration
         )
     }
 
@@ -249,7 +273,11 @@ final class SettingsManager {
         if let raw = rows["assistant_llm_timeout"], let val = Double(raw) { assistantLLMTimeout = val }
         if let raw = rows["assistant_llm_max_tokens"], let val = Int(raw) { assistantLLMMaxTokens = val }
         if let raw = rows["assistant_llm_temperature"], let val = Double(raw) { assistantLLMTemperature = val }
-        if let raw = rows["assistant_context_duration"], let val = Double(raw) { assistantContextDuration = val }
+        if let raw = rows["assistant_shortcut_enabled"] { assistantShortcutEnabled = raw == "true" }
+        if let raw = rows["assistant_shortcut_preset"],
+           let val = AssistantShortcutPreset(rawValue: raw) {
+            assistantShortcutPreset = val
+        }
         if let raw = rows["stt_rate_assemblyai"], let v = Double(raw) { sttRateAssemblyAI = v }
         if let raw = rows["stt_rate_deepgram"], let v = Double(raw) { sttRateDeepgram = v }
         if let raw = rows["stt_rate_openai"], let v = Double(raw) { sttRateOpenAI = v }
@@ -263,6 +291,9 @@ final class SettingsManager {
         llmApiKey = loadSecret("llm_api_key")
         openRouterApiKey = loadSecret("openrouter_api_key")
         assistantLLMAPIKey = loadSecret(LLMConfiguration.keychainAccount)
+        tencentASRAppID = loadSecret(Self.tencentASRAppIDAccount)
+        tencentASRSecretID = loadSecret(Self.tencentASRSecretIDAccount)
+        tencentASRSecretKey = loadSecret(Self.tencentASRSecretKeyAccount)
 
         Self.logger.info("Settings loaded (\(rows.count) persisted keys)")
     }
