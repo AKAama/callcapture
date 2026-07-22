@@ -97,6 +97,31 @@ struct LiveMeetingCoordinatorTests {
         await harness.coordinator.clearAndClose()
     }
 
+    @Test("重连丢弃隔离会清空故障期队列并从新音频正常继续")
+    @MainActor func discardsReconnectBacklogBeforeResumingFreshPCM() async {
+        let harness = Harness(bufferCapacity: 8)
+        await harness.transcriber.delaySends(byNanoseconds: 20_000_000)
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.requireReconnectDiscard(
+            sequence: 1,
+            discardedChunkCount: 1
+        )
+
+        harness.capture.emit(Data([1]))
+        harness.capture.emit(Data([2]))
+        harness.capture.emit(Data([3]))
+        await waitUntil { await harness.transcriber.acknowledgedDiscardSequences == [1] }
+
+        #expect(await harness.transcriber.sentPCM.isEmpty)
+        #expect(harness.coordinator.droppedChunkCount == 3)
+
+        harness.capture.emit(Data([4]))
+        await waitUntil { await harness.transcriber.sentPCM == [Data([4])] }
+
+        #expect(harness.coordinator.state == .live)
+        await harness.coordinator.clearAndClose()
+    }
+
     @Test("独立的 LLM 请求失败不会改变实时会议状态")
     @MainActor func ignoresUnrelatedAssistantFailure() async {
         let harness = Harness()
@@ -190,23 +215,35 @@ struct LiveMeetingCoordinatorTests {
         await harness.coordinator.clearAndClose()
     }
 
-    @Test("稳定 live 状态中的丢帧计数会发布可观察更新")
-    @MainActor func publishesDroppedChunkCountWhileLive() async {
-        let harness = Harness(bufferCapacity: 1)
+    @Test("丢帧计数只在变化时按节流频率发布")
+    @MainActor func throttlesChangedOnlyDroppedChunkPublication() async {
+        #expect(LiveMeetingCoordinator.defaultDropMonitorIntervalNanoseconds >= 250_000_000)
+        let harness = Harness(bufferCapacity: 1, dropMonitorIntervalNanoseconds: 5_000_000)
         await harness.coordinator.start(process: Self.process)
-        let observation = DropObservationFlag()
+        let observation = DropObservationCounter()
         withObservationTracking {
             _ = harness.coordinator.droppedChunkCount
         } onChange: {
             observation.markChanged()
         }
 
+        try? await Task<Never, Never>.sleep(nanoseconds: 20_000_000)
+        #expect(observation.changeCount == 0)
+
         harness.capture.emit(Data([1]))
         harness.capture.emit(Data([2]))
-        await waitUntil { observation.didChange }
+        await waitUntil { observation.changeCount == 1 }
+
+        withObservationTracking {
+            _ = harness.coordinator.droppedChunkCount
+        } onChange: {
+            observation.markChanged()
+        }
+        try? await Task<Never, Never>.sleep(nanoseconds: 20_000_000)
 
         #expect(harness.coordinator.state == .live)
         #expect(harness.coordinator.droppedChunkCount == 1)
+        #expect(observation.changeCount == 1)
         await harness.coordinator.clearAndClose()
     }
 
@@ -578,7 +615,9 @@ private extension LiveMeetingCoordinatorTests {
         init(
             recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder(),
             bufferCapacity: Int = 8,
-            captureStopFailures: Int = 0
+            captureStopFailures: Int = 0,
+            dropMonitorIntervalNanoseconds: UInt64 = LiveMeetingCoordinator
+                .defaultDropMonitorIntervalNanoseconds
         ) {
             capture = FakeLiveCapture(
                 recorder: recorder,
@@ -592,7 +631,8 @@ private extension LiveMeetingCoordinatorTests {
                 transcriberFactory: { [transcriber] in transcriber },
                 configurationProvider: { LiveMeetingCoordinatorTests.configuration },
                 processObserver: FakeMeetingProcessObserver(),
-                bufferCapacity: bufferCapacity
+                bufferCapacity: bufferCapacity,
+                dropMonitorIntervalNanoseconds: dropMonitorIntervalNanoseconds
             )
         }
     }
@@ -622,16 +662,16 @@ private final class MutableCoordinatorMeetingClock: MeetingSessionClock, @unchec
     }
 }
 
-private final class DropObservationFlag: @unchecked Sendable {
+private final class DropObservationCounter: @unchecked Sendable {
     private let lock = NSLock()
-    private var changed = false
+    private var changes = 0
 
-    var didChange: Bool {
-        lock.withLock { changed }
+    var changeCount: Int {
+        lock.withLock { changes }
     }
 
     func markChanged() {
-        lock.withLock { changed = true }
+        lock.withLock { changes += 1 }
     }
 }
 
@@ -773,6 +813,8 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
     private var delayConnect = false
     private var connectContinuation: CheckedContinuation<Void, Error>?
     private var sendDelayNanoseconds: UInt64 = 0
+    private var reconnectDiscard: (sequence: Int, chunkCount: Int)?
+    private(set) var acknowledgedDiscardSequences: [Int] = []
 
     init(recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder()) {
         let pair = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
@@ -796,7 +838,7 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
         connectionStateContinuation.yield(.live)
     }
 
-    func send(_ pcm: Data) async throws {
+    func send(_ pcm: Data) async throws -> LiveTranscriberSendResult {
         sendAttemptCount += 1
         if sendDelayNanoseconds > 0 {
             try await Task<Never, Never>.sleep(
@@ -804,8 +846,32 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
             )
         }
         if sendsFail { throw FakeCoordinatorError.failed }
+        if let reconnectDiscard {
+            return .reconnectDiscardRequired(
+                sequence: reconnectDiscard.sequence,
+                discardedChunkCount: reconnectDiscard.chunkCount
+            )
+        }
         sentPCM.append(pcm)
         await recorder.append("asr.send")
+        return .sent
+    }
+
+    func reconnectDiscardStatus() -> LiveTranscriberSendResult? {
+        guard let reconnectDiscard else { return nil }
+        return .reconnectDiscardRequired(
+            sequence: reconnectDiscard.sequence,
+            discardedChunkCount: reconnectDiscard.chunkCount
+        )
+    }
+
+    func acknowledgeReconnectDiscard(sequence: Int) -> Int {
+        acknowledgedDiscardSequences.append(sequence)
+        guard let reconnectDiscard,
+              reconnectDiscard.sequence == sequence
+        else { return 0 }
+        self.reconnectDiscard = nil
+        return reconnectDiscard.chunkCount
     }
 
     nonisolated func events() -> AsyncThrowingStream<TranscriptEvent, Error> {
@@ -858,6 +924,10 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
 
     func delaySends(byNanoseconds nanoseconds: UInt64) {
         sendDelayNanoseconds = nanoseconds
+    }
+
+    func requireReconnectDiscard(sequence: Int, discardedChunkCount: Int) {
+        reconnectDiscard = (sequence, discardedChunkCount)
     }
 }
 

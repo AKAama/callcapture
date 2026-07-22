@@ -53,6 +53,26 @@ final class PCMChunkBuffer: @unchecked Sendable {
         return chunks.removeFirst()
     }
 
+    /// Discards every currently queued chunk while leaving the buffer open.
+    /// Used as the explicit audio timeline barrier after an ASR reconnect.
+    @discardableResult
+    func discardQueued() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let discarded = chunks.count
+        chunks.removeAll(keepingCapacity: true)
+        recordDiscarded(discarded)
+        return discarded
+    }
+
+    /// Includes audio discarded outside this queue (for example an in-flight
+    /// provider frame) in the same observable degradation total.
+    func recordDiscarded(_ count: Int) {
+        guard count > 0 else { return }
+        OSAtomicAdd64Barrier(Int64(count), &totalDiscarded)
+    }
+
     /// Stops accepting new chunks while preserving queued chunks for draining.
     func finish() {
         lock.lock()
@@ -98,7 +118,7 @@ final class PCMChunkBuffer: @unchecked Sendable {
     }
 
     private func recordDiscard() {
-        OSAtomicIncrement64Barrier(&totalDiscarded)
+        recordDiscarded(1)
     }
 
     private func resetDiscardCount() {

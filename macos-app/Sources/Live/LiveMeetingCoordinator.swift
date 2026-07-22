@@ -152,6 +152,8 @@ private final class LiveMeetingSession {
     var dropMonitorTask: Task<Void, Never>?
     var teardownOperation: LiveMeetingTeardownOperation?
     var pipelineFailed = false
+    var handledReconnectDiscardSequence = 0
+    var hasInFlightPCM = false
     var intent: LiveMeetingSessionIntent = .startup
 
     var acceptsStartupCompletion: Bool {
@@ -206,6 +208,10 @@ final class LiveMeetingCoordinator {
     private let bufferCapacity: Int
     @ObservationIgnored
     private let sessionClockFactory: @MainActor () -> any MeetingSessionClock
+    @ObservationIgnored
+    private let dropMonitorIntervalNanoseconds: UInt64
+
+    nonisolated static let defaultDropMonitorIntervalNanoseconds: UInt64 = 250_000_000
 
     @ObservationIgnored
     private var sessionGeneration = 0
@@ -219,6 +225,8 @@ final class LiveMeetingCoordinator {
         configurationProvider: @escaping @MainActor () throws -> ASRConfiguration,
         processObserver: (any LiveMeetingProcessObserving)? = nil,
         bufferCapacity: Int = 64,
+        dropMonitorIntervalNanoseconds: UInt64 = LiveMeetingCoordinator
+            .defaultDropMonitorIntervalNanoseconds,
         sessionClockFactory: @escaping @MainActor () -> any MeetingSessionClock = {
             MonotonicMeetingSessionClock()
         }
@@ -229,6 +237,7 @@ final class LiveMeetingCoordinator {
         self.configurationProvider = configurationProvider
         self.processObserver = processObserver ?? SystemLiveMeetingProcessObserver()
         self.bufferCapacity = bufferCapacity
+        self.dropMonitorIntervalNanoseconds = dropMonitorIntervalNanoseconds
         self.sessionClockFactory = sessionClockFactory
     }
 
@@ -426,8 +435,12 @@ private extension LiveMeetingCoordinator {
                         self.transition(to: .reconnecting)
                     }
                 case .live:
-                    if self.state == .reconnecting {
-                        self.transition(to: .live)
+                    guard self.state == .reconnecting else { break }
+                    self.transition(to: .live)
+                    if !session.hasInFlightPCM,
+                       let discard = await session.transcriber.reconnectDiscardStatus() {
+                        guard self.isActive(session) else { return }
+                        await self.handleReconnectDiscard(discard, for: session)
                     }
                 case .idle, .connecting, .finished, .failed:
                     break
@@ -443,9 +456,15 @@ private extension LiveMeetingCoordinator {
         session.senderTask = Task { [weak self] in
             while !Task.isCancelled {
                 if let pcm = buffer.pop() {
+                    session.hasInFlightPCM = true
                     do {
-                        try await transcriber.send(pcm)
+                        let result = try await transcriber.send(pcm)
+                        session.hasInFlightPCM = false
+                        if case .reconnectDiscardRequired = result {
+                            await self?.handleReconnectDiscard(result, for: session)
+                        }
                     } catch {
+                        session.hasInFlightPCM = false
                         if Task.isCancelled { return }
                         Task { @MainActor [weak self] in
                             await self?.pipelineDidFail(generation: generation)
@@ -455,7 +474,12 @@ private extension LiveMeetingCoordinator {
                     continue
                 }
 
-                if buffer.isFinishedAndEmpty { return }
+                if buffer.isFinishedAndEmpty {
+                    if let discard = await transcriber.reconnectDiscardStatus() {
+                        await self?.handleReconnectDiscard(discard, for: session)
+                    }
+                    return
+                }
                 try? await Task<Never, Never>.sleep(nanoseconds: 2_000_000)
             }
         }
@@ -469,14 +493,36 @@ private extension LiveMeetingCoordinator {
                       self.isActive(session)
                 else { return }
                 self.mirrorDroppedChunkCount(from: session)
-                try? await Task<Never, Never>.sleep(nanoseconds: 20_000_000)
+                try? await Task<Never, Never>.sleep(
+                    nanoseconds: self.dropMonitorIntervalNanoseconds
+                )
             }
         }
     }
 
     func mirrorDroppedChunkCount(from session: LiveMeetingSession) {
         guard isActive(session) else { return }
-        reportedDroppedChunkCount = session.buffer.discardedCount
+        let discardedChunkCount = session.buffer.discardedCount
+        guard reportedDroppedChunkCount != discardedChunkCount else { return }
+        reportedDroppedChunkCount = discardedChunkCount
+    }
+
+    func handleReconnectDiscard(
+        _ result: LiveTranscriberSendResult,
+        for session: LiveMeetingSession
+    ) async {
+        guard isActive(session),
+              case let .reconnectDiscardRequired(sequence, _) = result,
+              sequence > session.handledReconnectDiscardSequence
+        else { return }
+
+        session.handledReconnectDiscardSequence = sequence
+        session.buffer.discardQueued()
+        let providerDiscardedChunkCount = await session.transcriber
+            .acknowledgeReconnectDiscard(sequence: sequence)
+        guard isActive(session) else { return }
+        session.buffer.recordDiscarded(providerDiscardedChunkCount)
+        mirrorDroppedChunkCount(from: session)
     }
 
     func startEventTask(for session: LiveMeetingSession) {

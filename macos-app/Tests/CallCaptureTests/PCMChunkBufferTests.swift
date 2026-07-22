@@ -39,4 +39,20 @@ struct PCMChunkBufferTests {
         #expect(buffer.discardedCount == 1)
         #expect(buffer.isFinishedAndEmpty)
     }
+
+    @Test("重连隔离点会清空已排队音频并计入降级数")
+    func discardsQueuedAudioAtReconnectBarrier() {
+        let buffer = PCMChunkBuffer(capacity: 4)
+        #expect(buffer.push(Data([1])) == 0)
+        #expect(buffer.push(Data([2])) == 0)
+
+        #expect(buffer.discardQueued() == 2)
+        #expect(buffer.pop() == nil)
+        #expect(buffer.discardedCount == 2)
+
+        buffer.recordDiscarded(1)
+        #expect(buffer.discardedCount == 3)
+        #expect(buffer.push(Data([3])) == 0)
+        #expect(buffer.pop() == Data([3]))
+    }
 }

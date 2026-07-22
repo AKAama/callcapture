@@ -150,6 +150,9 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
     private var reconnectTask: Task<Bool, Never>?
     private var receiveTask: Task<Void, Never>?
     private var pendingPCM = Data()
+    private var pendingPCMInputChunkCount = 0
+    private var reconnectDiscardSequence = 0
+    private var pendingReconnectDiscard: (sequence: Int, chunkCount: Int)?
     private var lastAudioSendNanoseconds: UInt64?
     private var finishRequested = false
     private var streamTerminated = false
@@ -253,7 +256,7 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
         }
     }
 
-    func send(_ pcm: Data) async throws {
+    func send(_ pcm: Data) async throws -> LiveTranscriberSendResult {
         await acquireSendSlot()
         defer { releaseSendSlot() }
 
@@ -268,14 +271,38 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
         }
 
         guard state == .live else { throw errorForCurrentState() }
-        guard !pcm.isEmpty else { return }
+        guard !pcm.isEmpty else { return .sent }
+        if pendingReconnectDiscard != nil {
+            addCurrentInputToReconnectDiscard()
+            return reconnectDiscardResult()
+        }
         pendingPCM.append(pcm)
+        pendingPCMInputChunkCount += 1
 
         while pendingPCM.count >= Self.pcmBytesPerTwoHundredMilliseconds {
             let frame = Data(pendingPCM.prefix(Self.pcmBytesPerTwoHundredMilliseconds))
-            try await transmit(frame)
+            guard try await transmit(frame) else {
+                return reconnectDiscardResult()
+            }
             pendingPCM.removeFirst(Self.pcmBytesPerTwoHundredMilliseconds)
         }
+        if pendingPCM.isEmpty {
+            pendingPCMInputChunkCount = 0
+        }
+        return .sent
+    }
+
+    func reconnectDiscardStatus() -> LiveTranscriberSendResult? {
+        guard pendingReconnectDiscard != nil else { return nil }
+        return reconnectDiscardResult()
+    }
+
+    func acknowledgeReconnectDiscard(sequence: Int) -> Int {
+        guard let discard = pendingReconnectDiscard,
+              discard.sequence == sequence
+        else { return 0 }
+        pendingReconnectDiscard = nil
+        return discard.chunkCount
     }
 
     nonisolated func events() -> AsyncThrowingStream<TranscriptEvent, Error> {
@@ -304,8 +331,10 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
         do {
             if !pendingPCM.isEmpty {
                 let finalAudio = pendingPCM
-                try await transmit(finalAudio)
-                pendingPCM.removeAll(keepingCapacity: false)
+                if try await transmit(finalAudio) {
+                    pendingPCM.removeAll(keepingCapacity: false)
+                    pendingPCMInputChunkCount = 0
+                }
             }
 
             finishRequested = true
@@ -334,6 +363,8 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
         self.authenticatingConnection = nil
         configuration = nil
         pendingPCM.removeAll(keepingCapacity: false)
+        pendingPCMInputChunkCount = 0
+        pendingReconnectDiscard = nil
         state = .finished
         terminateEventStream()
         await connection?.cancel()
@@ -558,6 +589,7 @@ private extension TencentLiveTranscriber {
             return state == .live && !finishRequested
         }
 
+        beginReconnectDiscard()
         state = .reconnecting
         lastAudioSendNanoseconds = nil
         let failedConnection = connection
@@ -648,41 +680,68 @@ private extension TencentLiveTranscriber {
         return false
     }
 
-    func transmit(_ frame: Data) async throws {
-        while true {
-            guard !finishRequested, state != .finished else {
-                throw TencentLiveTranscriberError.finished
-            }
-            if state == .reconnecting, let reconnectTask {
-                guard await reconnectTask.value else {
-                    throw errorForCurrentState()
-                }
-            }
-            guard state == .live, let connection else {
+    func transmit(_ frame: Data) async throws -> Bool {
+        guard !finishRequested, state != .finished else {
+            throw TencentLiveTranscriberError.finished
+        }
+        if state == .reconnecting, let reconnectTask {
+            guard await reconnectTask.value else {
                 throw errorForCurrentState()
             }
-
-            let generation = connectionGeneration
-            do {
-                try await paceNextAudioFrame()
-                try await connection.send(.data(frame))
-                let sentAt = await scheduler.nowNanoseconds()
-                guard generation == connectionGeneration,
-                      state == .live,
-                      self.connection != nil
-                else {
-                    continue
-                }
-                lastAudioSendNanoseconds = sentAt
-                return
-            } catch is CancellationError {
-                throw TencentLiveTranscriberError.connectionFailed
-            } catch {
-                guard await recover(from: generation) else {
-                    throw errorForCurrentState()
-                }
-            }
+            return false
         }
+        guard state == .live, let connection else {
+            throw errorForCurrentState()
+        }
+
+        let generation = connectionGeneration
+        do {
+            try await paceNextAudioFrame()
+            guard generation == connectionGeneration,
+                  state == .live,
+                  self.connection != nil
+            else { return false }
+            try await connection.send(.data(frame))
+            let sentAt = await scheduler.nowNanoseconds()
+            guard generation == connectionGeneration,
+                  state == .live,
+                  self.connection != nil
+            else { return false }
+            lastAudioSendNanoseconds = sentAt
+            return true
+        } catch is CancellationError {
+            throw TencentLiveTranscriberError.connectionFailed
+        } catch {
+            guard await recover(from: generation) else {
+                throw errorForCurrentState()
+            }
+            return false
+        }
+    }
+
+    func beginReconnectDiscard() {
+        reconnectDiscardSequence += 1
+        let carriedCount = pendingReconnectDiscard?.chunkCount ?? 0
+        pendingReconnectDiscard = (
+            reconnectDiscardSequence,
+            carriedCount + pendingPCMInputChunkCount
+        )
+        pendingPCM.removeAll(keepingCapacity: true)
+        pendingPCMInputChunkCount = 0
+    }
+
+    func addCurrentInputToReconnectDiscard() {
+        guard var discard = pendingReconnectDiscard else { return }
+        discard.chunkCount += 1
+        pendingReconnectDiscard = discard
+    }
+
+    func reconnectDiscardResult() -> LiveTranscriberSendResult {
+        guard let discard = pendingReconnectDiscard else { return .sent }
+        return .reconnectDiscardRequired(
+            sequence: discard.sequence,
+            discardedChunkCount: discard.chunkCount
+        )
     }
 
     func paceNextAudioFrame() async throws {

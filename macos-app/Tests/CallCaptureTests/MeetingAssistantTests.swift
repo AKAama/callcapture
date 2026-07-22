@@ -453,7 +453,11 @@ private actor AssistantTestTranscriber: LiveTranscriber {
     }
 
     func connect(configuration: ASRConfiguration) async throws {}
-    func send(_ pcm: Data) async throws {}
+    func send(_ pcm: Data) async throws -> LiveTranscriberSendResult { .sent }
+
+    func reconnectDiscardStatus() async -> LiveTranscriberSendResult? { nil }
+
+    func acknowledgeReconnectDiscard(sequence: Int) async -> Int { 0 }
     nonisolated func events() -> AsyncThrowingStream<TranscriptEvent, Error> { eventStream }
     func finish() async { continuation.finish() }
     func cancel() async { continuation.finish() }

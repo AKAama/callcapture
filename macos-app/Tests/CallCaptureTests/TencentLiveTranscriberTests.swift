@@ -387,9 +387,15 @@ struct TencentLiveTranscriberTests {
         await transcriber.cancel()
     }
 
-    @Test("旧连接延迟完成的发送会在新代连接上重发")
-    func resendsAStaleDelayedFrameAfterReconnect() async throws {
-        let first = FakeTencentWebSocketConnection(cancelCompletesBlockedSend: false)
+    @Test("长时间断线后旧 PCM 不会被平移进新连接的 30 秒上下文")
+    @MainActor
+    func excludesStalePCMFromRecentContextAfterLongReconnect() async throws {
+        let first = FakeTencentWebSocketConnection(
+            initialInbound: [.text(
+                #"{"code":0,"message":"success","sentences":{"sentence_list":[{"sentence":"旧内容","sentence_type":1,"sentence_id":0,"speaker_id":1,"start_time":0,"end_time":200}]}}"#
+            )],
+            cancelCompletesBlockedSend: false
+        )
         let second = FakeTencentWebSocketConnection()
         let transport = FakeTencentWebSocketTransport([
             .connection(first),
@@ -398,11 +404,15 @@ struct TencentLiveTranscriberTests {
         let scheduler = FakeTencentTranscriberScheduler()
         let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
         try await transcriber.connect(configuration: configuration)
+        var events = transcriber.events().makeAsyncIterator()
+        let oldEvent = try #require(try await events.next())
         await first.blockNextDataSend()
-        let frame = Data(repeating: 9, count: 6_400)
-        let sendTask = Task { try await transcriber.send(frame) }
+        let staleFrame = Data(repeating: 9, count: 6_400)
+        let freshFrame = Data(repeating: 7, count: 6_400)
+        let sendTask = Task { try await transcriber.send(staleFrame) }
 
         try await waitUntil { await first.hasBlockedSend }
+        await scheduler.advance(nanoseconds: 40_000_000_000)
         await first.failInbound()
         try await waitUntil {
             let attempts = await transport.connectionAttempts
@@ -410,10 +420,67 @@ struct TencentLiveTranscriberTests {
             return attempts == 2 && state == .live
         }
         await first.completeBlockedSendSuccessfully()
-        try await sendTask.value
+        let sendResult = try await sendTask.value
+        guard case let .reconnectDiscardRequired(sequence, discardedChunkCount) = sendResult else {
+            Issue.record("Expected a reconnect discard barrier")
+            await transcriber.cancel()
+            return
+        }
+        #expect(discardedChunkCount == 1)
+        await transcriber.acknowledgeReconnectDiscard(sequence: sequence)
+        try await transcriber.send(freshFrame)
+        await second.enqueue(.text(
+            #"{"code":0,"sentences":{"sentence_list":[{"sentence":"新内容","sentence_type":1,"sentence_id":0,"speaker_id":1,"start_time":0,"end_time":200}]}}"#
+        ))
+        let freshEvent = try #require(try await events.next())
 
-        #expect(await first.sentMessages == [.data(frame)])
-        #expect(await second.sentMessages == [.data(frame)])
+        #expect(await first.sentMessages == [.data(staleFrame)])
+        #expect(await second.sentMessages == [.data(freshFrame)])
+
+        let store = LiveTranscriptStore()
+        store.apply(oldEvent)
+        store.apply(freshEvent)
+        #expect(store.context(endingAt: 40.4, duration: 30).map(\.text) == ["新内容"])
+        await transcriber.cancel()
+    }
+
+    @Test("重连会丢弃供应商内部尚未成帧的 PCM 并报告降级")
+    func discardsProviderPendingPCMOnReconnect() async throws {
+        let first = FakeTencentWebSocketConnection()
+        let second = FakeTencentWebSocketConnection()
+        let transport = FakeTencentWebSocketTransport([
+            .connection(first),
+            .connection(second),
+        ])
+        let transcriber = makeTranscriber(
+            transport: transport,
+            scheduler: FakeTencentTranscriberScheduler()
+        )
+        try await transcriber.connect(configuration: configuration)
+        try await transcriber.send(Data(repeating: 3, count: 3_200))
+
+        await first.failInbound()
+        try await waitUntil {
+            let attempts = await transport.connectionAttempts
+            let state = await transcriber.state
+            return attempts == 2 && state == .live
+        }
+
+        guard let discardStatus = await transcriber.reconnectDiscardStatus(),
+              case let .reconnectDiscardRequired(sequence, discardedChunkCount) =
+              discardStatus
+        else {
+            Issue.record("Expected pending PCM to create a reconnect discard barrier")
+            await transcriber.cancel()
+            return
+        }
+        #expect(discardedChunkCount == 1)
+        #expect(await transcriber.acknowledgeReconnectDiscard(sequence: sequence) == 1)
+        #expect(await second.sentMessages.isEmpty)
+
+        let freshFrame = Data(repeating: 4, count: 6_400)
+        try await transcriber.send(freshFrame)
+        #expect(await second.sentMessages == [.data(freshFrame)])
         await transcriber.cancel()
     }
 
@@ -693,6 +760,10 @@ private actor FakeTencentTranscriberScheduler: TencentTranscriberScheduler {
     func sleep(nanoseconds: UInt64) async throws {
         try Task.checkCancellation()
         recordedSleeps.append(nanoseconds)
+        now += nanoseconds
+    }
+
+    func advance(nanoseconds: UInt64) {
         now += nanoseconds
     }
 }

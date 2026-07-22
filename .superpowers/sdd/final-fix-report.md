@@ -92,3 +92,68 @@ Permanent coverage now includes:
   AppKit/manual meeting validation still require the desktop/provider checks
   already listed in the implementation plan. No external endpoint or real
   credential was used in this fix wave.
+
+## Follow-up review fixes: reconnect PCM isolation and publication throttling
+
+The follow-up full-branch review found that a delayed pre-outage PCM frame was
+retried on the recovered Tencent connection. Because that connection's
+provider timestamps are offset to reconnect time, stale speech could otherwise
+be shifted into a later assistant context window.
+
+The transport and coordinator now use an explicit, sequence-numbered reconnect
+discard barrier:
+
+- Tencent clears provider-pending PCM when recovery starts and never retries a
+  frame after its connection generation changes.
+- A sender that crosses the reconnect boundary returns a discard barrier. The
+  coordinator atomically clears all queued outage PCM, acknowledges the
+  barrier, and only then resumes with fresh capture data.
+- The coordinator tracks its one in-flight PCM send so the connection-state
+  task cannot acknowledge a barrier ahead of an older popped chunk. Barrier
+  sequence numbers make the state and sender paths idempotent.
+- Provider-pending/in-flight and coordinator-queued losses are added to the
+  same degradation count. Teardown also reconciles any barrier that has no
+  later PCM send.
+- The Core Audio callback remains push-only (`PCMChunkBuffer.push`). It does no
+  actor hop, UI mutation, network/file IO, or blocking lock acquisition.
+
+Dropped-count publication now polls at 250 ms by default instead of 20 ms and
+assigns observable state only when the count changes. Direct reads still see
+the atomic buffer total immediately.
+
+### Follow-up TDD evidence
+
+Permanent regressions were written before the production changes. The
+pre-fix production snapshot failed the strict-concurrency reconnect runtime
+regression with:
+
+`RED: stale PCM replayed on recovered connection: 2 frames`
+
+The permanent suites now cover:
+
+- a 40-second outage where the delayed old frame is absent from the recovered
+  socket, fresh PCM continues normally, and the later 30-second context
+  contains only the fresh utterance;
+- provider-internal sub-frame PCM being discarded and counted on reconnect;
+- coordinator in-flight plus queued outage PCM being discarded and counted,
+  followed by successful fresh PCM transmission;
+- reconnect queue discard accounting in `PCMChunkBuffer`; and
+- a 250 ms production publication interval with no observation notification
+  for unchanged counts.
+
+### Follow-up verification
+
+- Full `swift build`: passed (`Build complete!`).
+- Full strict-concurrency build command exited successfully:
+  `swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warn-concurrency`.
+- Fresh strict-concurrency production reconnect runtime smoke: passed with
+  `reconnect-discard-runtime-smoke-pass`. It uses the real Tencent transcriber
+  and verifies socket payloads plus the post-outage 30-second window.
+- Fresh strict-concurrency PCM barrier runtime smoke: passed with
+  `pcm-discard-runtime-smoke-pass`.
+- `swift test` still cannot compile this repository's test target on the host
+  because the installed toolchain has no `Testing` module.
+- `swiftc -frontend -parse` over all production and test Swift sources: passed.
+- `git diff --check`: passed.
+- Changed-source privacy/log scan found no added logging of PCM, transcript,
+  credentials, signed URLs, prompts, or replies.
