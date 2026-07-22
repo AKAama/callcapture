@@ -47,9 +47,10 @@ struct LiveTranscriptStoreTests {
         #expect(store.context(endingAt: 100, duration: 30).map(\.id) == ["a", "b"])
     }
 
-    @Test("当前会议时间使用字幕的会话相对时间基准")
+    @Test("当前会议时间使用注入的会话单调相对时钟")
     @MainActor func exposesMeetingRelativeTime() {
         let store = LiveTranscriptStore()
+        store.beginMeeting(clock: StoreMeetingClock(elapsedTime: 10.5))
         store.apply(.confirmed(id: "a", speakerID: "1", text: "较早", startMS: 1_000, endMS: 2_000))
         store.apply(.partial(id: "p", speakerID: "2", text: "当前", startMS: 9_000, endMS: 10_500))
 
@@ -83,4 +84,8 @@ struct LiveTranscriptStoreTests {
 
 private extension Collection {
     var single: Element? { count == 1 ? first : nil }
+}
+
+private struct StoreMeetingClock: MeetingSessionClock {
+    let elapsedTime: TimeInterval
 }

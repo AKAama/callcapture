@@ -9,10 +9,6 @@ enum MeetingAssistantState: Equatable, Sendable {
     case failed
 }
 
-protocol MeetingAssistantClock: Sendable {
-    var now: TimeInterval { get }
-}
-
 protocol MeetingAssistantStreaming: Sendable {
     func stream(
         messages: [LLMMessage],
@@ -75,7 +71,7 @@ final class MeetingAssistant {
     @ObservationIgnored
     private let configurationProvider: @MainActor () -> LLMConfiguration
     @ObservationIgnored
-    private let clock: (any MeetingAssistantClock)?
+    private let clock: (any MeetingSessionClock)?
     @ObservationIgnored
     private let contextDuration: TimeInterval
 
@@ -88,7 +84,7 @@ final class MeetingAssistant {
         store: LiveTranscriptStore,
         client: any MeetingAssistantStreaming = OpenAICompatibleClient(),
         configurationProvider: @escaping @MainActor () -> LLMConfiguration,
-        clock: (any MeetingAssistantClock)? = nil,
+        clock: (any MeetingSessionClock)? = nil,
         contextDuration: TimeInterval = MeetingAssistant.defaultContextDuration
     ) {
         self.store = store
@@ -105,7 +101,7 @@ final class MeetingAssistant {
         reply = ""
         errorMessage = nil
 
-        let endingAt = clock?.now ?? store.currentMeetingTime
+        let endingAt = clock?.elapsedTime ?? store.currentMeetingTime
         let utterances = store
             .context(endingAt: endingAt, duration: contextDuration)
             .sorted {

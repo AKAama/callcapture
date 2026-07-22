@@ -143,6 +143,9 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
     private var connection: (any TencentWebSocketConnection)?
     private var authenticatingConnection: (any TencentWebSocketConnection)?
     private var connectionGeneration = 0
+    private var sessionTimelineOriginNanoseconds: UInt64?
+    private var connectionTimelineOffsetMS = 0
+    private var latestTimelineEndMS = 0
     private var reconnectAttempts = 0
     private var reconnectTask: Task<Bool, Never>?
     private var receiveTask: Task<Void, Never>?
@@ -200,6 +203,7 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
 
         state = .connecting
         self.configuration = configuration
+        sessionTimelineOriginNanoseconds = await scheduler.nowNanoseconds()
         var candidate: (any TencentWebSocketConnection)?
 
         do {
@@ -220,10 +224,22 @@ actor TencentLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateRep
             }
 
             authenticatingConnection = nil
-            connectionGeneration += 1
+            let timelineOffsetMS = await nextConnectionTimelineOffsetMS()
+            guard state == .connecting else {
+                await newConnection.cancel()
+                throw TencentLiveTranscriberError.finished
+            }
+            let nextGeneration = connectionGeneration + 1
+            let handshakeEvents = try scope(
+                handshake.events,
+                generation: nextGeneration,
+                timelineOffsetMS: timelineOffsetMS
+            )
+            connectionGeneration = nextGeneration
+            connectionTimelineOffsetMS = timelineOffsetMS
             connection = newConnection
             state = .live
-            yield(handshake.events)
+            yield(handshakeEvents)
             startReceiving(on: newConnection, generation: connectionGeneration)
         } catch {
             authenticatingConnection = nil
@@ -397,9 +413,71 @@ private extension TencentLiveTranscriber {
         return DecodedServerFrame(events: events, isFinal: completion.final == 1)
     }
 
+    func nextConnectionTimelineOffsetMS() async -> Int {
+        guard let origin = sessionTimelineOriginNanoseconds else {
+            return latestTimelineEndMS
+        }
+        let now = await scheduler.nowNanoseconds()
+        guard now >= origin else { return latestTimelineEndMS }
+        let elapsedMilliseconds = (now - origin) / 1_000_000
+        let boundedElapsed = elapsedMilliseconds > UInt64(Int.max)
+            ? Int.max
+            : Int(elapsedMilliseconds)
+        return max(latestTimelineEndMS, boundedElapsed)
+    }
+
     func yield(_ events: [TranscriptEvent]) {
         for event in events {
+            switch event {
+            case let .partial(_, _, _, _, endMS), let .confirmed(_, _, _, _, endMS):
+                latestTimelineEndMS = max(latestTimelineEndMS, endMS)
+            }
             eventContinuation.yield(event)
+        }
+    }
+
+    func scope(
+        _ events: [TranscriptEvent],
+        generation: Int,
+        timelineOffsetMS: Int
+    ) throws -> [TranscriptEvent] {
+        try events.map {
+            try scope($0, generation: generation, timelineOffsetMS: timelineOffsetMS)
+        }
+    }
+
+    func scope(
+        _ event: TranscriptEvent,
+        generation: Int,
+        timelineOffsetMS: Int
+    ) throws -> TranscriptEvent {
+        func scopedID(_ id: String) -> String { "\(generation):\(id)" }
+        func scopedSpeakerID(_ speakerID: String?) -> String? {
+            speakerID.map { "\(generation):\($0)" }
+        }
+        func offset(_ value: Int) throws -> Int {
+            let (result, overflow) = value.addingReportingOverflow(timelineOffsetMS)
+            guard !overflow else { throw TencentTranscriptDecoderError.invalidResponse }
+            return result
+        }
+
+        switch event {
+        case let .partial(id, speakerID, text, startMS, endMS):
+            return .partial(
+                id: scopedID(id),
+                speakerID: scopedSpeakerID(speakerID),
+                text: text,
+                startMS: try offset(startMS),
+                endMS: try offset(endMS)
+            )
+        case let .confirmed(id, speakerID, text, startMS, endMS):
+            return .confirmed(
+                id: scopedID(id),
+                speakerID: scopedSpeakerID(speakerID),
+                text: text,
+                startMS: try offset(startMS),
+                endMS: try offset(endMS)
+            )
         }
     }
 
@@ -439,7 +517,12 @@ private extension TencentLiveTranscriber {
 
             do {
                 let frame = try decode(message)
-                yield(frame.events)
+                let events = try scope(
+                    frame.events,
+                    generation: generation,
+                    timelineOffsetMS: connectionTimelineOffsetMS
+                )
+                yield(events)
                 if frame.isFinal {
                     await completeSuccessfully()
                     return
@@ -529,11 +612,24 @@ private extension TencentLiveTranscriber {
                 }
 
                 authenticatingConnection = nil
-                connectionGeneration += 1
+                let timelineOffsetMS = await nextConnectionTimelineOffsetMS()
+                guard !Task.isCancelled, state == .reconnecting else {
+                    await newConnection.cancel()
+                    reconnectTask = nil
+                    return false
+                }
+                let nextGeneration = connectionGeneration + 1
+                let handshakeEvents = try scope(
+                    handshake.events,
+                    generation: nextGeneration,
+                    timelineOffsetMS: timelineOffsetMS
+                )
+                connectionGeneration = nextGeneration
+                connectionTimelineOffsetMS = timelineOffsetMS
                 connection = newConnection
                 state = .live
                 reconnectTask = nil
-                yield(handshake.events)
+                yield(handshakeEvents)
                 startReceiving(on: newConnection, generation: connectionGeneration)
                 return true
             } catch {

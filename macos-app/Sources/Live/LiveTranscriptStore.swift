@@ -1,5 +1,26 @@
+import Dispatch
 import Foundation
 import Observation
+
+/// A meeting-relative clock. Values are elapsed seconds from one session's
+/// monotonic origin, never wall-clock timestamps.
+protocol MeetingSessionClock: Sendable {
+    var elapsedTime: TimeInterval { get }
+}
+
+struct MonotonicMeetingSessionClock: MeetingSessionClock {
+    private let originNanoseconds: UInt64
+
+    init(originNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds) {
+        self.originNanoseconds = originNanoseconds
+    }
+
+    var elapsedTime: TimeInterval {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now >= originNanoseconds else { return 0 }
+        return TimeInterval(now - originNanoseconds) / 1_000_000_000
+    }
+}
 
 /// The sole in-memory source of transcript state for a live meeting.
 ///
@@ -14,13 +35,17 @@ final class LiveTranscriptStore {
 
     private var confirmedByID: [String: TranscriptUtterance] = [:]
     private var labelBySpeakerID: [String: String] = [:]
+    @ObservationIgnored
+    private var meetingClock: (any MeetingSessionClock)?
 
-    /// Latest endpoint in the provider's meeting-relative transcript timeline.
-    /// Assistant windows must use this coordinate system rather than wall time.
+    /// Current elapsed time in this meeting's monotonic, relative timeline.
     var currentMeetingTime: TimeInterval {
-        let confirmedEndMS = confirmedUtterances.lazy.map(\.endMS).max() ?? 0
-        let partialEndMS = partialUtterance?.endMS ?? 0
-        return TimeInterval(max(confirmedEndMS, partialEndMS)) / 1_000
+        max(0, meetingClock?.elapsedTime ?? 0)
+    }
+
+    /// Installs the fresh relative time origin created by the coordinator.
+    func beginMeeting(clock: any MeetingSessionClock) {
+        meetingClock = clock
     }
 
     func apply(_ event: TranscriptEvent) {
@@ -77,6 +102,7 @@ final class LiveTranscriptStore {
         confirmedUtterances = []
         confirmedByID = [:]
         labelBySpeakerID = [:]
+        meetingClock = nil
     }
 
     private func utterance(

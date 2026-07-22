@@ -1,5 +1,6 @@
 import CoreAudio
 import Foundation
+import Observation
 import Testing
 @testable import CallCapture
 
@@ -148,6 +149,35 @@ struct LiveMeetingCoordinatorTests {
         await coordinator.clearAndClose()
     }
 
+    @Test("每场会议都安装新的单调相对时钟")
+    @MainActor func resetsSessionClockForEachMeeting() async {
+        let store = LiveTranscriptStore()
+        let firstClock = MutableCoordinatorMeetingClock(elapsedTime: 12)
+        let secondClock = MutableCoordinatorMeetingClock(elapsedTime: 0)
+        var clocks: [MutableCoordinatorMeetingClock] = [firstClock, secondClock]
+        let firstTranscriber = FakeLiveTranscriber()
+        let secondTranscriber = FakeLiveTranscriber()
+        var transcribers = [firstTranscriber, secondTranscriber]
+        let coordinator = LiveMeetingCoordinator(
+            capture: FakeLiveCapture(),
+            transcriptStore: store,
+            transcriberFactory: { transcribers.removeFirst() },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver(),
+            sessionClockFactory: { clocks.removeFirst() }
+        )
+
+        await coordinator.start(process: Self.process)
+        #expect(store.currentMeetingTime == 12)
+        await coordinator.stop()
+
+        await coordinator.start(process: Self.process)
+        #expect(store.currentMeetingTime == 0)
+        secondClock.elapsedTime = 7
+        #expect(store.currentMeetingTime == 7)
+        await coordinator.clearAndClose()
+    }
+
     @Test("PCM 回调只进入有界队列且完整报告满载丢弃数")
     @MainActor func reportsDroppedPCMChunks() async {
         let harness = Harness(bufferCapacity: 1)
@@ -156,6 +186,26 @@ struct LiveMeetingCoordinatorTests {
         harness.capture.emit(Data([1]))
         harness.capture.emit(Data([2]))
 
+        #expect(harness.coordinator.droppedChunkCount == 1)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("稳定 live 状态中的丢帧计数会发布可观察更新")
+    @MainActor func publishesDroppedChunkCountWhileLive() async {
+        let harness = Harness(bufferCapacity: 1)
+        await harness.coordinator.start(process: Self.process)
+        let observation = DropObservationFlag()
+        withObservationTracking {
+            _ = harness.coordinator.droppedChunkCount
+        } onChange: {
+            observation.markChanged()
+        }
+
+        harness.capture.emit(Data([1]))
+        harness.capture.emit(Data([2]))
+        await waitUntil { observation.didChange }
+
+        #expect(harness.coordinator.state == .live)
         #expect(harness.coordinator.droppedChunkCount == 1)
         await harness.coordinator.clearAndClose()
     }
@@ -562,6 +612,27 @@ private extension LiveMeetingCoordinatorTests {
 
 private enum FakeAssistantError: Error {
     case unavailable
+}
+
+private final class MutableCoordinatorMeetingClock: MeetingSessionClock, @unchecked Sendable {
+    var elapsedTime: TimeInterval
+
+    init(elapsedTime: TimeInterval) {
+        self.elapsedTime = elapsedTime
+    }
+}
+
+private final class DropObservationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var changed = false
+
+    var didChange: Bool {
+        lock.withLock { changed }
+    }
+
+    func markChanged() {
+        lock.withLock { changed = true }
+    }
 }
 
 private enum FakeCoordinatorError: Error {

@@ -41,7 +41,7 @@ struct TencentLiveTranscriberTests {
 
         var iterator = transcriber.events().makeAsyncIterator()
         #expect(try await iterator.next() == .partial(
-            id: "0",
+            id: "1:0",
             speakerID: nil,
             text: "首帧字幕",
             startMS: 0,
@@ -136,8 +136,8 @@ struct TencentLiveTranscriberTests {
 
         let event = try await iterator.next()
         #expect(event == .confirmed(
-            id: "4",
-            speakerID: "2",
+            id: "1:4",
+            speakerID: "1:2",
             text: "测试字幕",
             startMS: 100,
             endMS: 500
@@ -273,11 +273,11 @@ struct TencentLiveTranscriberTests {
         switch await eventTask.value {
         case let .success(event):
             #expect(event == .partial(
-                id: "0",
+                id: "2:0",
                 speakerID: nil,
                 text: "恢复",
-                startMS: 0,
-                endMS: 200
+                startMS: 200,
+                endMS: 400
             ))
         case .failure:
             Issue.record("Expected an event after reconnect")
@@ -286,6 +286,64 @@ struct TencentLiveTranscriberTests {
         #expect(await transport.connectedVoiceIDs == ["initial-voice", "retry-voice-1"])
         #expect(await transcriber.state == .live)
 
+        await transcriber.cancel()
+    }
+
+    @Test("重连后相同句子与说话人 ID 使用新代命名空间并延续会议时间线")
+    @MainActor func namespacesReconnectIdentityAndTimeline() async throws {
+        let first = FakeTencentWebSocketConnection(initialInbound: [.text(
+            #"{"code":0,"sentences":{"sentence_list":[{"sentence":"旧连接","sentence_type":1,"sentence_id":0,"speaker_id":1,"start_time":100,"end_time":200}]}}"#
+        )])
+        let second = FakeTencentWebSocketConnection(initialInbound: [.text(
+            #"{"code":0,"sentences":{"sentence_list":[{"sentence":"新连接临时","sentence_type":0,"sentence_id":0,"speaker_id":1,"start_time":0,"end_time":100}]}}"#
+        )])
+        let transport = FakeTencentWebSocketTransport([
+            .connection(first),
+            .connection(second),
+        ])
+        let scheduler = FakeTencentTranscriberScheduler()
+        let transcriber = makeTranscriber(transport: transport, scheduler: scheduler)
+        try await transcriber.connect(configuration: configuration)
+        var iterator = transcriber.events().makeAsyncIterator()
+
+        let oldFinal = try #require(try await iterator.next())
+        await first.failInbound()
+        let newPartial = try #require(try await iterator.next())
+        await second.enqueue(.text(
+            #"{"code":0,"sentences":{"sentence_list":[{"sentence":"新连接最终","sentence_type":1,"sentence_id":0,"speaker_id":1,"start_time":0,"end_time":150}]}}"#
+        ))
+        let newFinal = try #require(try await iterator.next())
+
+        #expect(oldFinal == .confirmed(
+            id: "1:0",
+            speakerID: "1:1",
+            text: "旧连接",
+            startMS: 100,
+            endMS: 200
+        ))
+        #expect(newPartial == .partial(
+            id: "2:0",
+            speakerID: "2:1",
+            text: "新连接临时",
+            startMS: 200,
+            endMS: 300
+        ))
+        #expect(newFinal == .confirmed(
+            id: "2:0",
+            speakerID: "2:1",
+            text: "新连接最终",
+            startMS: 200,
+            endMS: 350
+        ))
+
+        let store = LiveTranscriptStore()
+        store.apply(oldFinal)
+        store.apply(newPartial)
+        store.apply(newFinal)
+        #expect(store.confirmedUtterances.map(\.text) == ["旧连接", "新连接最终"])
+        #expect(store.confirmedUtterances.map(\.startMS) == [100, 200])
+        #expect(store.confirmedUtterances.map(\.speakerLabel) == ["发言人 1", "发言人 2"])
+        #expect(store.partialUtterance == nil)
         await transcriber.cancel()
     }
 
@@ -314,11 +372,11 @@ struct TencentLiveTranscriberTests {
         switch await eventTask.value {
         case let .success(event):
             #expect(event == .confirmed(
-                id: "2",
-                speakerID: "1",
+                id: "2:2",
+                speakerID: "2:1",
                 text: "恢复",
-                startMS: 200,
-                endMS: 400
+                startMS: 800,
+                endMS: 1_000
             ))
         case .failure:
             Issue.record("Expected recovery after rejected handshake")

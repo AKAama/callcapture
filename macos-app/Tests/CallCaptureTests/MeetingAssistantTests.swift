@@ -6,9 +6,11 @@ import Testing
 
 @Suite("30-second meeting assistant")
 struct MeetingAssistantTests {
-    @Test("production composition uses the transcript meeting-relative endpoint")
+    @Test("production composition uses session elapsed time and advances through silence")
     @MainActor func composesWithProductionTimebase() {
+        let clock = MutableMeetingSessionClock(elapsedTime: 100)
         let store = populatedStore()
+        store.beginMeeting(clock: clock)
         let assistant = MeetingAssistant(
             store: store,
             client: RecordingMeetingAssistantClient(),
@@ -17,6 +19,10 @@ struct MeetingAssistantTests {
 
         #expect(assistant.compose(instruction: "给出想法"))
         #expect(assistant.contextText == "发言人 1：original-transcript-marker")
+
+        clock.elapsedTime = 140
+        #expect(!assistant.compose(instruction: "给出想法"))
+        #expect(assistant.contextText.isEmpty)
     }
 
     @Test("default composition selects exactly 30 seconds in chronological speaker-labelled form")
@@ -48,7 +54,7 @@ struct MeetingAssistantTests {
             store: store,
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
 
         let composed = assistant.compose(instruction: "给出想法")
@@ -69,7 +75,7 @@ struct MeetingAssistantTests {
             store: store,
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
         #expect(assistant.compose(instruction: "original-instruction-marker"))
         assistant.draft = "replacement-edit-marker"
@@ -102,7 +108,7 @@ struct MeetingAssistantTests {
             store: store,
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
 
         #expect(!assistant.compose(instruction: "给出想法"))
@@ -120,7 +126,7 @@ struct MeetingAssistantTests {
             store: populatedStore(),
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
         #expect(assistant.compose(instruction: "first"))
         assistant.draft = "first-edit"
@@ -148,7 +154,7 @@ struct MeetingAssistantTests {
             store: populatedStore(),
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
         #expect(assistant.compose(instruction: "分析风险"))
         #expect(assistant.submit())
@@ -173,7 +179,7 @@ struct MeetingAssistantTests {
             store: populatedStore(),
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
         #expect(assistant.compose(instruction: "分析风险"))
         #expect(assistant.submit())
@@ -192,7 +198,7 @@ struct MeetingAssistantTests {
             store: populatedStore(),
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
         #expect(assistant.compose(instruction: "first"))
         assistant.draft = "first-edit"
@@ -212,7 +218,7 @@ struct MeetingAssistantTests {
             store: populatedStore(),
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
         #expect(assistant.compose(instruction: "追问问题"))
         #expect(assistant.submit())
@@ -225,7 +231,7 @@ struct MeetingAssistantTests {
 
     @Test("LLM failure remains isolated from the live coordinator")
     @MainActor func isolatesFailureFromLiveCoordinator() async {
-        let store = populatedStore()
+        let store = LiveTranscriptStore()
         let capture = AssistantTestCapture()
         let transcriber = AssistantTestTranscriber()
         let coordinator = LiveMeetingCoordinator(
@@ -249,13 +255,20 @@ struct MeetingAssistantTests {
             bundleID: "example.meeting"
         ))
         #expect(coordinator.state == .live)
+        store.apply(.confirmed(
+            id: "context",
+            speakerID: "1",
+            text: "original-transcript-marker",
+            startMS: 90_000,
+            endMS: 99_000
+        ))
 
         let client = RecordingMeetingAssistantClient(error: AssistantTestError.unavailable)
         let assistant = MeetingAssistant(
             store: store,
             client: client,
             configurationProvider: { Self.configuration },
-            clock: FixedMeetingAssistantClock(now: 100)
+            clock: FixedMeetingAssistantClock(elapsedTime: 100)
         )
         #expect(assistant.compose(instruction: "分析风险"))
         #expect(assistant.submit())
@@ -316,8 +329,16 @@ private extension MeetingAssistantTests {
     }
 }
 
-private struct FixedMeetingAssistantClock: MeetingAssistantClock {
-    let now: TimeInterval
+private struct FixedMeetingAssistantClock: MeetingSessionClock {
+    let elapsedTime: TimeInterval
+}
+
+private final class MutableMeetingSessionClock: MeetingSessionClock, @unchecked Sendable {
+    var elapsedTime: TimeInterval
+
+    init(elapsedTime: TimeInterval) {
+        self.elapsedTime = elapsedTime
+    }
 }
 
 private struct RecordedAssistantRequest: Sendable {

@@ -149,6 +149,7 @@ private final class LiveMeetingSession {
     var senderTask: Task<Void, Never>?
     var eventTask: Task<Void, Never>?
     var connectionStateTask: Task<Void, Never>?
+    var dropMonitorTask: Task<Void, Never>?
     var teardownOperation: LiveMeetingTeardownOperation?
     var pipelineFailed = false
     var intent: LiveMeetingSessionIntent = .startup
@@ -185,9 +186,10 @@ private final class LiveMeetingSession {
 final class LiveMeetingCoordinator {
     private(set) var state: LiveConnectionState = .idle
     private(set) var lastError: String?
+    private var reportedDroppedChunkCount = 0
 
     var droppedChunkCount: Int {
-        activeSession?.buffer.discardedCount ?? 0
+        max(reportedDroppedChunkCount, activeSession?.buffer.discardedCount ?? 0)
     }
 
     @ObservationIgnored
@@ -202,6 +204,8 @@ final class LiveMeetingCoordinator {
     private let processObserver: any LiveMeetingProcessObserving
     @ObservationIgnored
     private let bufferCapacity: Int
+    @ObservationIgnored
+    private let sessionClockFactory: @MainActor () -> any MeetingSessionClock
 
     @ObservationIgnored
     private var sessionGeneration = 0
@@ -214,7 +218,10 @@ final class LiveMeetingCoordinator {
         transcriberFactory: @escaping @MainActor () -> any LiveTranscriber,
         configurationProvider: @escaping @MainActor () throws -> ASRConfiguration,
         processObserver: (any LiveMeetingProcessObserving)? = nil,
-        bufferCapacity: Int = 64
+        bufferCapacity: Int = 64,
+        sessionClockFactory: @escaping @MainActor () -> any MeetingSessionClock = {
+            MonotonicMeetingSessionClock()
+        }
     ) {
         self.capture = capture
         self.transcriptStore = transcriptStore
@@ -222,6 +229,7 @@ final class LiveMeetingCoordinator {
         self.configurationProvider = configurationProvider
         self.processObserver = processObserver ?? SystemLiveMeetingProcessObserver()
         self.bufferCapacity = bufferCapacity
+        self.sessionClockFactory = sessionClockFactory
     }
 
     /// Starts a fresh, memory-only meeting for the exact Core Audio process.
@@ -243,7 +251,9 @@ final class LiveMeetingCoordinator {
         )
         activeSession = session
         lastError = nil
+        reportedDroppedChunkCount = 0
         transcriptStore.clear()
+        transcriptStore.beginMeeting(clock: sessionClockFactory())
         transition(to: .connecting)
 
         do {
@@ -260,6 +270,7 @@ final class LiveMeetingCoordinator {
 
         startEventTask(for: session)
         startSenderTask(for: session)
+        startDropMonitorTask(for: session)
 
         let buffer = session.buffer
         let capture = self.capture
@@ -318,6 +329,7 @@ final class LiveMeetingCoordinator {
     func clearAndClose() async {
         guard let session = activeSession else {
             transcriptStore.clear()
+            reportedDroppedChunkCount = 0
             if capture.hasPendingCaptureResources {
                 lastError = LiveMeetingCoordinatorError.captureStopFailed.localizedDescription
                 transition(to: .error)
@@ -350,6 +362,7 @@ final class LiveMeetingCoordinator {
         } else {
             session.requestTerminalState(.idle)
             activeSession = nil
+            reportedDroppedChunkCount = 0
             lastError = nil
             transition(to: .idle)
         }
@@ -365,12 +378,17 @@ final class LiveMeetingCoordinator {
         session?.senderTask?.cancel()
         session?.eventTask?.cancel()
         session?.connectionStateTask?.cancel()
+        session?.dropMonitorTask?.cancel()
         session?.captureStartTask?.cancel()
         session?.teardownOperation?.task.cancel()
 
         capture.emergencyStop()
         let cleanupStillPending = capture.hasPendingCaptureResources
+        if let session {
+            mirrorDroppedChunkCount(from: session)
+        }
         activeSession = nil
+        reportedDroppedChunkCount = 0
         sessionGeneration += 1
         transcriptStore.clear()
         if cleanupStillPending {
@@ -441,6 +459,24 @@ private extension LiveMeetingCoordinator {
                 try? await Task<Never, Never>.sleep(nanoseconds: 2_000_000)
             }
         }
+    }
+
+    func startDropMonitorTask(for session: LiveMeetingSession) {
+        session.dropMonitorTask = Task { [weak self, weak session] in
+            while !Task.isCancelled {
+                guard let self,
+                      let session,
+                      self.isActive(session)
+                else { return }
+                self.mirrorDroppedChunkCount(from: session)
+                try? await Task<Never, Never>.sleep(nanoseconds: 20_000_000)
+            }
+        }
+    }
+
+    func mirrorDroppedChunkCount(from session: LiveMeetingSession) {
+        guard isActive(session) else { return }
+        reportedDroppedChunkCount = session.buffer.discardedCount
     }
 
     func startEventTask(for session: LiveMeetingSession) {
@@ -601,6 +637,9 @@ private extension LiveMeetingCoordinator {
             }
             await session.senderTask?.value
             session.senderTask = nil
+            self.mirrorDroppedChunkCount(from: session)
+            session.dropMonitorTask?.cancel()
+            session.dropMonitorTask = nil
             session.connectionStateTask?.cancel()
             session.connectionStateTask = nil
 

@@ -42,6 +42,9 @@ struct OpenAICompatibleClient: Sendable {
         subsystem: "com.callcapture.app",
         category: "MeetingAssistantLLM"
     )
+    private static let supportedFinishReasons: Set<String> = [
+        "stop", "length", "content_filter",
+    ]
 
     let session: URLSession
 
@@ -166,7 +169,6 @@ struct OpenAICompatibleClient: Sendable {
     ) async throws {
         var line = Data()
         var dataLines: [String] = []
-        var sawDataEvent = false
         var pendingCarriageReturn = false
 
         func finishLine() throws -> Bool {
@@ -176,7 +178,6 @@ struct OpenAICompatibleClient: Sendable {
 
             let payload = dataLines.joined(separator: "\n")
             dataLines.removeAll(keepingCapacity: true)
-            sawDataEvent = true
             return try consume(eventPayload: payload, continuation: continuation)
         }
 
@@ -199,10 +200,25 @@ struct OpenAICompatibleClient: Sendable {
             }
         }
 
-        if pendingCarriageReturn, try finishLine() {
-            return
+        if pendingCarriageReturn {
+            pendingCarriageReturn = false
+            if try finishLine() { return }
+        } else if !line.isEmpty {
+            defer { line.removeAll(keepingCapacity: true) }
+            _ = try collectDataField(from: line, into: &dataLines)
         }
-        guard sawDataEvent else { throw OpenAICompatibleClientError.invalidResponse }
+
+        // Some compatible providers close immediately after their last data
+        // field instead of sending a blank SSE delimiter. Parse that residual
+        // event, but accept EOF only when it carries an explicit terminator.
+        if !dataLines.isEmpty {
+            let payload = dataLines.joined(separator: "\n")
+            dataLines.removeAll(keepingCapacity: true)
+            if try consume(eventPayload: payload, continuation: continuation) {
+                return
+            }
+        }
+        throw OpenAICompatibleClientError.invalidResponse
     }
 
     /// Collects one SSE `data` field. Returns true only for a blank event delimiter.
@@ -235,18 +251,33 @@ struct OpenAICompatibleClient: Sendable {
             struct Choice: Decodable {
                 struct Delta: Decodable { let content: String? }
                 let delta: Delta
+                let finishReason: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case delta
+                    case finishReason = "finish_reason"
+                }
             }
             let choices: [Choice]
         }
 
         do {
             let envelope = try JSONDecoder().decode(Envelope.self, from: data)
+            var isTerminal = false
             for choice in envelope.choices {
                 if let content = choice.delta.content, !content.isEmpty {
                     continuation.yield(content)
                 }
+                if let finishReason = choice.finishReason {
+                    guard Self.supportedFinishReasons.contains(finishReason) else {
+                        throw OpenAICompatibleClientError.invalidResponse
+                    }
+                    isTerminal = true
+                }
             }
-            return false
+            return isTerminal
+        } catch let error as OpenAICompatibleClientError {
+            throw error
         } catch {
             throw OpenAICompatibleClientError.invalidResponse
         }

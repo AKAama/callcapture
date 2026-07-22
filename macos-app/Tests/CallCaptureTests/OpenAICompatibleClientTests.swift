@@ -221,6 +221,49 @@ struct OpenAICompatibleClientTests {
         }
     }
 
+    @Test("EOF after a valid delta without a terminal marker is invalid")
+    func rejectsPrematureEOFAfterDelta() async {
+        let session = makeSession { protocolClient, protocolInstance, request in
+            respond(status: 200, request: request, client: protocolClient, protocol: protocolInstance)
+            protocolClient.urlProtocol(
+                protocolInstance,
+                didLoad: Data("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n".utf8)
+            )
+            protocolClient.urlProtocolDidFinishLoading(protocolInstance)
+        }
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await collect(OpenAICompatibleClient(session: session).stream(
+                messages: [.init(role: .user, content: "hi")],
+                configuration: configuration()
+            ))
+            Issue.record("Expected premature EOF to fail")
+        } catch {
+            #expect(error as? OpenAICompatibleClientError == .invalidResponse)
+        }
+    }
+
+    @Test("a supported finish reason terminates an EOF residual event")
+    func acceptsFinishReasonAtEOF() async throws {
+        let session = makeSession { protocolClient, protocolInstance, request in
+            respond(status: 200, request: request, client: protocolClient, protocol: protocolInstance)
+            protocolClient.urlProtocol(
+                protocolInstance,
+                didLoad: Data("data: {\"choices\":[{\"delta\":{\"content\":\"complete\"},\"finish_reason\":\"stop\"}]}".utf8)
+            )
+            protocolClient.urlProtocolDidFinishLoading(protocolInstance)
+        }
+        defer { session.invalidateAndCancel() }
+
+        let chunks = try await collect(OpenAICompatibleClient(session: session).stream(
+            messages: [.init(role: .user, content: "hi")],
+            configuration: configuration()
+        ))
+
+        #expect(chunks == ["complete"])
+    }
+
     @Test("maps 401 and 429 without exposing response bodies")
     func mapsHTTPFailures() async {
         for (status, expected) in [
