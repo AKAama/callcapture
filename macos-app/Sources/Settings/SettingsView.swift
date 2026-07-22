@@ -9,12 +9,10 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var settings = appModel.settingsManager
         Form {
-            transcriptionSection(settings: settings)
-            apiKeysSection(settings: settings)
-            postProcessingSection(settings: settings)
-            pricingSection(settings: settings)
-            speakerSection(settings: settings)
-            exportSection(settings: settings)
+            realtimeASRSection(settings: settings)
+            meetingAssistantSection(settings: settings)
+            assistantShortcutSection(settings: settings)
+            realtimePrivacySection
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, minHeight: 520)
@@ -22,6 +20,19 @@ struct SettingsView: View {
     }
 
     // MARK: - Sections
+
+    @ViewBuilder
+    private func realtimeASRSection(settings: SettingsManager) -> some View {
+        @Bindable var settings = settings
+        Section("腾讯云实时字幕") {
+            SecureField("App ID", text: $settings.tencentASRAppID)
+            SecureField("Secret ID", text: $settings.tencentASRSecretID)
+            SecureField("Secret Key", text: $settings.tencentASRSecretKey)
+            Text("凭证保存在 macOS Keychain。每场会议只会把所选应用的内存音频流发送到腾讯云 ASR。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
 
     @ViewBuilder
     private func transcriptionSection(settings: SettingsManager) -> some View {
@@ -128,6 +139,106 @@ struct SettingsView: View {
             }
 
             Toggle("Auto-process on stop", isOn: $settings.autoProcessOnStop)
+        }
+    }
+
+    @ViewBuilder
+    private func meetingAssistantSection(settings: SettingsManager) -> some View {
+        @Bindable var settings = settings
+        Section("Meeting Assistant") {
+            Picker("Provider", selection: $settings.assistantLLMPreset) {
+                ForEach(LLMProviderPreset.allCases, id: \.self) { preset in
+                    Text(preset.displayName).tag(preset)
+                }
+            }
+            .onChange(of: settings.assistantLLMPreset) { _, preset in
+                settings.applyAssistantLLMPreset(preset)
+            }
+
+            TextField("Base URL", text: $settings.assistantLLMBaseURL)
+                .textFieldStyle(.roundedBorder)
+            TextField("Model", text: $settings.assistantLLMModel)
+                .textFieldStyle(.roundedBorder)
+            SecureField(
+                settings.assistantLLMPreset.requiresAPIKey ? "API Key" : "API Key (optional)",
+                text: $settings.assistantLLMAPIKey
+            )
+            Text("The API key is stored in macOS Keychain. Local providers may leave it blank.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            LabeledContent("Timeout (seconds)") {
+                TextField("30", value: $settings.assistantLLMTimeout, format: .number)
+                    .frame(width: 90)
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Maximum output tokens") {
+                TextField("600", value: $settings.assistantLLMMaxTokens, format: .number)
+                    .frame(width: 90)
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Temperature") {
+                TextField("0.3", value: $settings.assistantLLMTemperature, format: .number)
+                    .frame(width: 90)
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Transcript context") {
+                Text("30 seconds")
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Default system prompt")
+                TextEditor(text: $settings.assistantSystemPrompt)
+                    .font(.body)
+                    .frame(minHeight: 72)
+                Text("Prompt text stays in memory and is cleared when the app exits.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            AssistantLLMConnectionTestRow(configuration: settings.assistantLLMConfiguration)
+        }
+    }
+
+    @ViewBuilder
+    private func assistantShortcutSection(settings: SettingsManager) -> some View {
+        @Bindable var settings = settings
+        Section("助手快捷键") {
+            Toggle("启用全局快捷键", isOn: $settings.assistantShortcutEnabled)
+                .onChange(of: settings.assistantShortcutEnabled) { _, _ in
+                    appModel.reconfigureAssistantShortcut()
+                }
+
+            Picker("快捷键", selection: $settings.assistantShortcutPreset) {
+                ForEach(AssistantShortcutPreset.allCases) { preset in
+                    Text(preset.displayName).tag(preset)
+                }
+            }
+            .disabled(!settings.assistantShortcutEnabled)
+            .onChange(of: settings.assistantShortcutPreset) { _, _ in
+                appModel.reconfigureAssistantShortcut()
+            }
+
+            Text("默认使用 ⌥Space。重新配置或关闭此选项时，旧快捷键会立即注销。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let error = appModel.assistantShortcutError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private var realtimePrivacySection: some View {
+        Section("隐私") {
+            Text(RealtimePrivacy.notice)
+                .font(.caption)
+            Text("字幕、发送内容和模型回复只保存在内存中；开始新会议、清空字幕或退出应用时会清除。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -421,6 +532,114 @@ private struct OpenRouterTestRow: View {
             status = .failed(message: (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription)
         }
+    }
+}
+
+/// Uses a fixed, transcript-free probe against the configured Chat Completions endpoint.
+@available(macOS 14.2, *)
+private struct AssistantLLMConnectionTestRow: View {
+    let configuration: LLMConfiguration
+    @State private var tester = AssistantLLMConnectionTester()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button("Test Assistant Connection") {
+                    tester.start(configuration: configuration)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(configuration.validationError != nil || tester.status == .testing)
+
+                if tester.status == .testing {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+            }
+
+            switch tester.status {
+            case .idle:
+                if let error = configuration.validationError {
+                    Text(error.localizedDescription)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            case .testing:
+                Text("Sending a fixed, transcript-free probe…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .connected:
+                Label("Connected", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            case .failed(let message):
+                Label(message, systemImage: "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .onChange(of: configuration) { _, _ in tester.reset() }
+        .onDisappear { tester.reset() }
+    }
+}
+
+/// Owns and generations connection probes so superseded work cannot publish UI state.
+@MainActor
+@Observable
+final class AssistantLLMConnectionTester {
+    enum Status: Equatable {
+        case idle
+        case testing
+        case connected
+        case failed(String)
+    }
+
+    typealias Probe = @Sendable (LLMConfiguration) async throws -> String
+
+    private(set) var status: Status = .idle
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private let probe: Probe
+
+    init(probe: @escaping Probe = { configuration in
+        try await OpenAICompatibleClient().testConnection(configuration: configuration)
+    }) {
+        self.probe = probe
+    }
+
+    func start(configuration: LLMConfiguration) {
+        generation &+= 1
+        let currentGeneration = generation
+        task?.cancel()
+        status = .testing
+        let probe = probe
+        task = Task { [weak self] in
+            do {
+                _ = try await probe(configuration)
+                guard !Task.isCancelled else { return }
+                self?.finish(.connected, generation: currentGeneration)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? "Connection failed."
+                self?.finish(.failed(message), generation: currentGeneration)
+            }
+        }
+    }
+
+    func reset() {
+        generation &+= 1
+        task?.cancel()
+        task = nil
+        status = .idle
+    }
+
+    private func finish(_ result: Status, generation completedGeneration: Int) {
+        guard generation == completedGeneration else { return }
+        task = nil
+        status = result
     }
 }
 

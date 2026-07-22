@@ -19,10 +19,18 @@ final class AudioCaptureManager {
 
     private(set) var isRecording = false
 
+    /// Whether a capture callback or live recording still requires teardown.
+    /// This remains true after a failed start when HAL retained `ioProcID` so
+    /// higher-level lifecycle code can retry cleanup instead of reporting idle.
+    var hasPendingCaptureResources: Bool {
+        isRecording || ioProcID != nil
+    }
+
     private var tapID: AudioObjectID = .init(kAudioObjectUnknown)
     private var aggregateDeviceID: AudioObjectID = .init(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var fileWriter: AudioFileWriter?
+    private var pcmSink: (@Sendable (Data) -> Void)?
 
     /// Mono float32 format at the aggregate's input sample rate. All IO buffers
     /// (tap channels + any mic channels) are downmixed into this before
@@ -67,7 +75,9 @@ final class AudioCaptureManager {
         outputDeviceUID: String? = nil,
         micDeviceUID: String? = nil
     ) async throws {
-        guard !isRecording else { throw CaptureError.alreadyRecording }
+        guard !isRecording, ioProcID == nil else {
+            throw CaptureError.alreadyRecording
+        }
 
         Self.logger.info(
             "startCapture: output=\(outputDeviceUID ?? "default"), mic=\(micDeviceUID ?? "none")"
@@ -159,6 +169,7 @@ final class AudioCaptureManager {
         self.targetFormat = outputFormat
         self.converter = converter
         self.fileWriter = writer
+        self.pcmSink = nil
         self.bufferCount = 0
 
         // Record the tap channel count so the IO proc can split mic vs system.
@@ -220,8 +231,7 @@ final class AudioCaptureManager {
         let startStatus = AudioDeviceStart(aggregateDevice, procID)
         guard startStatus == noErr else {
             Self.logger.error("startCapture: AudioDeviceStart failed: \(startStatus)")
-            AudioDeviceDestroyIOProcID(aggregateDevice, procID)
-            self.ioProcID = nil
+            try stopIOProc()
             self.converter = nil
             self.fileWriter = nil
             try? self.micWriter?.finalize()
@@ -239,14 +249,128 @@ final class AudioCaptureManager {
         Self.logger.info("Capture started, writing to \(outputPath.path)")
     }
 
-    /// Stops the current recording and finalizes the WAV file.
+    /// Starts capturing one Core Audio process and emits 16 kHz mono PCM16
+    /// chunks directly from the audio callback.
+    ///
+    /// The supplied object ID must be the Core Audio process object ID exposed
+    /// by `AudioProcessEnumerator`, not the process's Unix PID. The callback is
+    /// invoked synchronously on Core Audio's real-time thread and therefore
+    /// must remain nonblocking.
+    func startLiveCapture(
+        processObjectID: AudioObjectID,
+        onPCM: @escaping @Sendable (Data) -> Void
+    ) async throws {
+        guard !isRecording, ioProcID == nil else {
+            throw CaptureError.alreadyRecording
+        }
+
+        let tapUUID = UUID()
+        let tapDescription = CATapDescription(
+            stereoMixdownOfProcesses: [processObjectID]
+        )
+        tapDescription.name = "CallCapture-LiveProcessTap"
+        tapDescription.uuid = tapUUID
+
+        var tapObjectID = AudioObjectID(kAudioObjectUnknown)
+        let tapStatus = AudioHardwareCreateProcessTap(
+            tapDescription,
+            &tapObjectID
+        )
+        guard tapStatus == noErr else {
+            throw CaptureError.tapCreationFailed(status: tapStatus)
+        }
+        self.tapID = tapObjectID
+
+        do {
+            let aggregateDevice = try Self.createAggregateDevice(
+                tapUUID: tapUUID,
+                micDeviceUID: nil
+            )
+            self.aggregateDeviceID = aggregateDevice
+
+            let inputFormat = try Self.deviceInputFormat(deviceID: aggregateDevice)
+            guard let mixFormat = AVAudioFormat(
+                standardFormatWithSampleRate: inputFormat.sampleRate,
+                channels: Self.targetChannelCount
+            ) else {
+                throw CaptureError.tapCreationFailed(status: -1)
+            }
+            guard let outputFormat = AVAudioFormat(
+                standardFormatWithSampleRate: Self.targetSampleRate,
+                channels: Self.targetChannelCount
+            ) else {
+                throw CaptureError.tapCreationFailed(status: -2)
+            }
+            guard let converter = AVAudioConverter(
+                from: mixFormat,
+                to: outputFormat
+            ) else {
+                throw CaptureError.tapCreationFailed(status: -3)
+            }
+
+            self.mixFormat = mixFormat
+            self.targetFormat = outputFormat
+            self.converter = converter
+            self.fileWriter = nil
+            self.pcmSink = onPCM
+            self.bufferCount = 0
+            self.systemTapChannels = Self.tapChannelCount(tapID: tapObjectID)
+
+            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+            var procID: AudioDeviceIOProcID?
+            let createStatus = AudioDeviceCreateIOProcID(
+                aggregateDevice,
+                { _, _, inInputData, _, _, _, inClientData -> OSStatus in
+                    guard let inClientData else { return noErr }
+                    let manager = Unmanaged<AudioCaptureManager>
+                        .fromOpaque(inClientData)
+                        .takeUnretainedValue()
+                    return manager.handleIO(inInputData)
+                },
+                selfPtr,
+                &procID
+            )
+            guard createStatus == noErr, let procID else {
+                throw CaptureError.tapCreationFailed(status: createStatus)
+            }
+            self.ioProcID = procID
+
+            let startStatus = AudioDeviceStart(aggregateDevice, procID)
+            guard startStatus == noErr else {
+                throw CaptureError.tapCreationFailed(status: startStatus)
+            }
+
+            self.isRecording = true
+        } catch let startError {
+            do {
+                try stopIOProc()
+            } catch let cleanupError {
+                // The registered callback still contains a pass-unretained
+                // pointer to this manager. Retain every dependent resource so
+                // stopCapture() or emergencyStop() can retry destruction.
+                throw cleanupError
+            }
+            pcmSink = nil
+            converter = nil
+            targetFormat = nil
+            mixFormat = nil
+            destroyAggregateDevice()
+            destroyTap()
+            throw startError
+        }
+    }
+
+    /// Stops the current capture and finalizes any active WAV file.
     ///
     /// - Throws: `CaptureError.notRecording` if no recording is active,
+    ///   `CaptureError.ioProcCleanupFailed` if callback destruction fails,
     ///   or `CaptureError.finalizationFailed` if the file cannot be closed.
     func stopCapture() async throws {
-        guard isRecording else { throw CaptureError.notRecording }
+        guard isRecording || ioProcID != nil else {
+            throw CaptureError.notRecording
+        }
 
-        stopIOProc()
+        try stopIOProc()
 
         try? micWriter?.finalize()
         try? systemWriter?.finalize()
@@ -256,7 +380,10 @@ final class AudioCaptureManager {
         } catch {
             Self.logger.error("File finalization failed: \(error)")
             fileWriter = nil
+            pcmSink = nil
             converter = nil
+            targetFormat = nil
+            mixFormat = nil
             micWriter = nil
             systemWriter = nil
             micConverter = nil
@@ -268,7 +395,10 @@ final class AudioCaptureManager {
         }
 
         fileWriter = nil
+        pcmSink = nil
         converter = nil
+        targetFormat = nil
+        mixFormat = nil
         micWriter = nil
         systemWriter = nil
         micConverter = nil
@@ -277,7 +407,7 @@ final class AudioCaptureManager {
         destroyTap()
         isRecording = false
 
-        Self.logger.info("Capture stopped and file finalized")
+        Self.logger.info("Capture stopped")
     }
 
     /// Synchronously releases all capture resources without throwing.
@@ -287,16 +417,26 @@ final class AudioCaptureManager {
     /// the audio engine, aggregate device, and process tap. Safe to call when
     /// not recording.
     func emergencyStop() {
-        guard isRecording else { return }
+        guard isRecording || ioProcID != nil else { return }
         Self.logger.warning("emergencyStop: releasing capture resources")
 
-        stopIOProc()
+        do {
+            try stopIOProc()
+        } catch {
+            Self.logger.error(
+                "emergencyStop: retaining capture resources after IO callback cleanup failure: \(error)"
+            )
+            return
+        }
 
         try? fileWriter?.finalize()
         try? micWriter?.finalize()
         try? systemWriter?.finalize()
         fileWriter = nil
+        pcmSink = nil
         converter = nil
+        targetFormat = nil
+        mixFormat = nil
         micWriter = nil
         systemWriter = nil
         micConverter = nil
@@ -309,11 +449,54 @@ final class AudioCaptureManager {
 
     // MARK: - Private Helpers
 
-    /// Stops and destroys the aggregate device IO proc, if active.
-    private func stopIOProc() {
+    struct IOProcCleanupOutcome {
+        let stopStatus: OSStatus
+        let destroyStatus: OSStatus
+
+        var didDestroy: Bool { destroyStatus == noErr }
+    }
+
+    /// Runs the HAL cleanup calls in order while preserving both statuses for
+    /// the state-owning caller. Destruction is still attempted after a stop
+    /// error because an already-stopped device may report a stop failure while
+    /// allowing its registered callback to be removed safely.
+    static func performIOProcCleanup(
+        stop: () -> OSStatus,
+        destroy: () -> OSStatus
+    ) -> IOProcCleanupOutcome {
+        let stopStatus = stop()
+        let destroyStatus = destroy()
+        return IOProcCleanupOutcome(
+            stopStatus: stopStatus,
+            destroyStatus: destroyStatus
+        )
+    }
+
+    /// Stops and destroys the aggregate device IO proc, if active. The stored
+    /// handle is cleared only after HAL confirms callback destruction.
+    private func stopIOProc() throws {
         guard let procID = ioProcID else { return }
-        AudioDeviceStop(aggregateDeviceID, procID)
-        AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
+        let outcome = Self.performIOProcCleanup(
+            stop: { AudioDeviceStop(self.aggregateDeviceID, procID) },
+            destroy: {
+                AudioDeviceDestroyIOProcID(self.aggregateDeviceID, procID)
+            }
+        )
+
+        if outcome.stopStatus != noErr {
+            Self.logger.warning(
+                "AudioDeviceStop failed during cleanup: OSStatus=\(outcome.stopStatus)"
+            )
+        }
+        guard outcome.didDestroy else {
+            Self.logger.error(
+                "AudioDeviceDestroyIOProcID failed during cleanup: OSStatus=\(outcome.destroyStatus)"
+            )
+            throw CaptureError.ioProcCleanupFailed(
+                stopStatus: outcome.stopStatus,
+                destroyStatus: outcome.destroyStatus
+            )
+        }
         ioProcID = nil
     }
 
@@ -336,6 +519,51 @@ final class AudioCaptureManager {
             if trailing > systemChannels { break }
         }
         return 0
+    }
+
+    /// Encodes a floating-point PCM buffer as interleaved, little-endian PCM16.
+    /// Samples outside `-1...1` are saturated instead of wrapping.
+    static func pcm16Data(from buffer: AVAudioPCMBuffer) -> Data {
+        guard
+            let channels = buffer.floatChannelData,
+            buffer.frameLength > 0
+        else { return Data() }
+
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard channelCount > 0 else { return Data() }
+        let isInterleaved = buffer.format.isInterleaved
+
+        var data = Data(count: frameCount * channelCount * MemoryLayout<Int16>.size)
+        data.withUnsafeMutableBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for frame in 0..<frameCount {
+                for channel in 0..<channelCount {
+                    let sample = isInterleaved
+                        ? channels[0][frame * channelCount + channel]
+                        : channels[channel][frame]
+                    let pcmSample: Int16
+                    if sample.isNaN {
+                        pcmSample = 0
+                    } else if sample >= 1 {
+                        pcmSample = .max
+                    } else if sample <= -1 {
+                        pcmSample = .min
+                    } else {
+                        let scaled = Int32((sample * 32_768).rounded())
+                        pcmSample = Int16(
+                            max(Int32(Int16.min), min(Int32(Int16.max), scaled))
+                        )
+                    }
+
+                    let bits = UInt16(bitPattern: pcmSample)
+                    let offset = (frame * channelCount + channel) * 2
+                    bytes[offset] = UInt8(truncatingIfNeeded: bits)
+                    bytes[offset + 1] = UInt8(truncatingIfNeeded: bits >> 8)
+                }
+            }
+        }
+        return data
     }
 
     /// Sums the given buffer-index range of an aggregate buffer list into a
@@ -380,15 +608,10 @@ final class AudioCaptureManager {
     /// Handles one IO callback. The aggregate may deliver several separate
     /// float32 buffers (e.g. the system-audio tap and a mic stream). All of
     /// them are summed/averaged into a single mono buffer (the mix), then
-    /// converted to the 16 kHz target format and written. Runs on a real-time
-    /// audio thread.
+    /// converted to the 16 kHz target format and written or emitted. Runs on a
+    /// real-time audio thread.
     private func handleIO(_ inInputData: UnsafePointer<AudioBufferList>) -> OSStatus {
-        guard
-            let mixFormat,
-            let targetFormat,
-            let converter,
-            let writer = fileWriter
-        else { return noErr }
+        guard let mixFormat, let targetFormat, let converter else { return noErr }
 
         let abl = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inInputData)
@@ -400,6 +623,25 @@ final class AudioCaptureManager {
         guard firstChannels > 0, first.mDataByteSize > 0 else { return noErr }
         let frameCount = Int(first.mDataByteSize) / (MemoryLayout<Float>.size * firstChannels)
         guard frameCount > 0 else { return noErr }
+
+        if let pcmSink {
+            if let mix = downmix(
+                abl,
+                indices: 0..<abl.count,
+                frameCount: frameCount,
+                format: mixFormat
+            ) {
+                handleLiveAudioBuffer(
+                    mix,
+                    converter: converter,
+                    outputFormat: targetFormat,
+                    onPCM: pcmSink
+                )
+            }
+            return noErr
+        }
+
+        guard let writer = fileWriter else { return noErr }
 
         bufferCount += 1
         if bufferCount == 1 {
@@ -431,6 +673,45 @@ final class AudioCaptureManager {
             }
         }
         return noErr
+    }
+
+    /// Converts and emits one live PCM chunk. This runs on Core Audio's
+    /// callback thread, so it deliberately performs no logging or file, network,
+    /// UI, or lock-waiting work.
+    private func handleLiveAudioBuffer(
+        _ buffer: AVAudioPCMBuffer,
+        converter: AVAudioConverter,
+        outputFormat: AVAudioFormat,
+        onPCM: @Sendable (Data) -> Void
+    ) {
+        let ratio = outputFormat.sampleRate / buffer.format.sampleRate
+        let frameCapacity = AVAudioFrameCount(
+            max(1, ceil(Double(buffer.frameLength) * ratio))
+        )
+        guard let convertedBuffer = AVAudioPCMBuffer(
+            pcmFormat: outputFormat,
+            frameCapacity: frameCapacity
+        ) else { return }
+
+        var error: NSError?
+        var inputConsumed = false
+        let status = converter.convert(
+            to: convertedBuffer,
+            error: &error
+        ) { _, outStatus in
+            if inputConsumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            inputConsumed = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
+
+        guard error == nil, status != .error, convertedBuffer.frameLength > 0 else {
+            return
+        }
+        onPCM(Self.pcm16Data(from: convertedBuffer))
     }
 
     private func handleAudioBuffer(
@@ -472,6 +753,12 @@ final class AudioCaptureManager {
     }
 
     private func destroyTap() {
+        guard ioProcID == nil else {
+            Self.logger.error(
+                "Refusing to destroy process tap while an IO callback remains registered"
+            )
+            return
+        }
         if tapID != kAudioObjectUnknown {
             let err = AudioHardwareDestroyProcessTap(tapID)
             if err != noErr {
@@ -482,6 +769,12 @@ final class AudioCaptureManager {
     }
 
     private func destroyAggregateDevice() {
+        guard ioProcID == nil else {
+            Self.logger.error(
+                "Refusing to destroy aggregate device while an IO callback remains registered"
+            )
+            return
+        }
         if aggregateDeviceID != kAudioObjectUnknown {
             let err = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             if err != noErr {

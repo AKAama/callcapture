@@ -4,26 +4,21 @@
 # share one assembly path.
 #
 # Usage:
-#   Scripts/assemble-app.sh <config> <worker_dist_dir> [output_app]
-#     config           debug | release
+#   Scripts/assemble-app.sh <swift_binary> <worker_dist_dir> [output_app]
+#     swift_binary     executable produced by `swift build --show-bin-path`
 #     worker_dist_dir  path to PyInstaller output (dir containing call-capture-worker)
 #     output_app       defaults to .build/CallCapture.app
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG="${1:-release}"
-WORKER_DIST="${2:?usage: assemble-app.sh <config> <worker_dist_dir> [output_app]}"
+SRC_BIN="${1:?usage: assemble-app.sh <swift_binary> <worker_dist_dir> [output_app]}"
+WORKER_DIST="${2:?usage: assemble-app.sh <swift_binary> <worker_dist_dir> [output_app]}"
 APP_BUNDLE="${3:-$APP_DIR/.build/CallCapture.app}"
 
 cd "$APP_DIR"
 
-if [[ "$CONFIG" == "release" ]]; then
-    SRC_BIN=".build/release/CallCapture"
-else
-    SRC_BIN=".build/arm64-apple-macosx/debug/CallCapture"
-fi
-[[ -f "$SRC_BIN" ]] || { echo "error: Swift binary missing at $SRC_BIN (run swift build first)" >&2; exit 1; }
+[[ -x "$SRC_BIN" ]] || { echo "error: Swift binary missing or not executable at $SRC_BIN (run swift build first)" >&2; exit 1; }
 [[ -x "$WORKER_DIST/call-capture-worker" ]] || { echo "error: worker missing at $WORKER_DIST/call-capture-worker" >&2; exit 1; }
 
 echo "===> creating bundle layout at $APP_BUNDLE"

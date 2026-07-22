@@ -1,0 +1,1021 @@
+import CoreAudio
+import Foundation
+import Observation
+import Testing
+@testable import CallCapture
+
+@Suite("LiveMeetingCoordinator")
+struct LiveMeetingCoordinatorTests {
+    @Test("开始会议会连接 ASR、启动所选进程采集并进入 live")
+    @MainActor func startsSelectedProcessMeeting() async {
+        let harness = Harness()
+
+        await harness.coordinator.start(process: Self.process)
+
+        #expect(harness.coordinator.state == .live)
+        #expect(harness.store.connectionState == .live)
+        #expect(harness.capture.startedProcessIDs == [Self.process.id])
+        #expect(await harness.transcriber.connectCount == 1)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("手动停止先停采集、排空队列，再结束 ASR 并进入 review")
+    @MainActor func stopsInPrivacyPreservingOrder() async {
+        let recorder = CoordinatorOperationRecorder()
+        let harness = Harness(recorder: recorder)
+        await harness.coordinator.start(process: Self.process)
+        harness.capture.emit(Data([1, 2, 3]))
+
+        await harness.coordinator.stop()
+
+        let operations = await recorder.operations
+        #expect(harness.coordinator.state == .review)
+        #expect(operations.contains("asr.send"))
+        #expect(operations.firstIndex(of: "capture.stop")! < operations.firstIndex(of: "asr.finish")!)
+        #expect(operations.firstIndex(of: "asr.send")! < operations.firstIndex(of: "asr.finish")!)
+        #expect(await harness.transcriber.finishCount == 1)
+        #expect(await harness.transcriber.cancelCount == 0)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("只有所选会议进程退出才会自动停止并保留字幕供 review")
+    @MainActor func stopsWhenSelectedProcessExits() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.emit(.confirmed(
+            id: "kept",
+            speakerID: "1",
+            text: "保留已有字幕",
+            startMS: 0,
+            endMS: 1_000
+        ))
+        await waitUntil { harness.store.confirmedUtterances.count == 1 }
+
+        await harness.coordinator.processDidExit(pid: Self.process.pid + 1)
+        #expect(harness.coordinator.state == .live)
+
+        await harness.coordinator.processDidExit(pid: Self.process.pid)
+
+        #expect(harness.coordinator.state == .review)
+        #expect(harness.capture.stopCount == 1)
+        #expect(harness.store.confirmedUtterances.map(\.id) == ["kept"])
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("ASR 重试耗尽会停止采集、进入 error，并保留已确认字幕")
+    @MainActor func handlesExhaustedASRRetries() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.emit(.confirmed(
+            id: "before-error",
+            speakerID: "1",
+            text: "错误前字幕",
+            startMS: 0,
+            endMS: 1_000
+        ))
+        await waitUntil { harness.store.confirmedUtterances.count == 1 }
+
+        await harness.transcriber.fail(TencentLiveTranscriberError.reconnectLimitExceeded)
+        await waitUntil { harness.coordinator.state == .error }
+
+        #expect(harness.capture.stopCount == 1)
+        #expect(harness.store.confirmedUtterances.map(\.id) == ["before-error"])
+        #expect(harness.coordinator.lastError != nil)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("ASR 重连状态只暂停连接展示，恢复后返回 live")
+    @MainActor func mirrorsASRReconnectState() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+
+        await harness.transcriber.emitConnectionState(.reconnecting)
+        await waitUntil { harness.coordinator.state == .reconnecting }
+        #expect(harness.capture.stopCount == 0)
+
+        await harness.transcriber.emitConnectionState(.live)
+        await waitUntil { harness.coordinator.state == .live }
+        #expect(harness.capture.stopCount == 0)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("重连丢弃隔离会清空故障期队列并从新音频正常继续")
+    @MainActor func discardsReconnectBacklogBeforeResumingFreshPCM() async {
+        let harness = Harness(bufferCapacity: 8)
+        await harness.transcriber.delaySends(byNanoseconds: 20_000_000)
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.requireReconnectDiscard(
+            sequence: 1,
+            discardedChunkCount: 1
+        )
+
+        harness.capture.emit(Data([1]))
+        harness.capture.emit(Data([2]))
+        harness.capture.emit(Data([3]))
+        await waitUntil { await harness.transcriber.acknowledgedDiscardSequences == [1] }
+
+        #expect(await harness.transcriber.sentPCM.isEmpty)
+        #expect(harness.coordinator.droppedChunkCount == 3)
+
+        harness.capture.emit(Data([4]))
+        await waitUntil { await harness.transcriber.sentPCM == [Data([4])] }
+
+        #expect(harness.coordinator.state == .live)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("独立的 LLM 请求失败不会改变实时会议状态")
+    @MainActor func ignoresUnrelatedAssistantFailure() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+
+        let assistantRequest = Task { () throws -> Void in
+            throw FakeAssistantError.unavailable
+        }
+        _ = await assistantRequest.result
+
+        #expect(harness.coordinator.state == .live)
+        #expect(harness.capture.stopCount == 0)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("开始下一场会议会在创建新 ASR 连接前清空上一场内存内容")
+    @MainActor func clearsPreviousMeetingBeforeStartingAnother() async {
+        let store = LiveTranscriptStore()
+        let firstTranscriber = FakeLiveTranscriber()
+        let secondTranscriber = FakeLiveTranscriber()
+        var transcribers: [FakeLiveTranscriber] = [firstTranscriber, secondTranscriber]
+        var transcriptCountsAtConfiguration: [Int] = []
+        let coordinator = LiveMeetingCoordinator(
+            capture: FakeLiveCapture(),
+            transcriptStore: store,
+            transcriberFactory: { transcribers.removeFirst() },
+            configurationProvider: {
+                transcriptCountsAtConfiguration.append(store.confirmedUtterances.count)
+                return Self.configuration
+            },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        await coordinator.start(process: Self.process)
+        await firstTranscriber.emit(.confirmed(
+            id: "old",
+            speakerID: "1",
+            text: "上一场",
+            startMS: 0,
+            endMS: 1_000
+        ))
+        await waitUntil { store.confirmedUtterances.count == 1 }
+        await coordinator.stop()
+
+        await coordinator.start(process: Self.process)
+
+        #expect(transcriptCountsAtConfiguration == [0, 0])
+        #expect(store.confirmedUtterances.isEmpty)
+        #expect(coordinator.state == .live)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("每场会议都安装新的单调相对时钟")
+    @MainActor func resetsSessionClockForEachMeeting() async {
+        let store = LiveTranscriptStore()
+        let firstClock = MutableCoordinatorMeetingClock(elapsedTime: 12)
+        let secondClock = MutableCoordinatorMeetingClock(elapsedTime: 0)
+        var clocks: [MutableCoordinatorMeetingClock] = [firstClock, secondClock]
+        let firstTranscriber = FakeLiveTranscriber()
+        let secondTranscriber = FakeLiveTranscriber()
+        var transcribers = [firstTranscriber, secondTranscriber]
+        let coordinator = LiveMeetingCoordinator(
+            capture: FakeLiveCapture(),
+            transcriptStore: store,
+            transcriberFactory: { transcribers.removeFirst() },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver(),
+            sessionClockFactory: { clocks.removeFirst() }
+        )
+
+        await coordinator.start(process: Self.process)
+        #expect(store.currentMeetingTime == 12)
+        await coordinator.stop()
+
+        await coordinator.start(process: Self.process)
+        #expect(store.currentMeetingTime == 0)
+        secondClock.elapsedTime = 7
+        #expect(store.currentMeetingTime == 7)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("PCM 回调只进入有界队列且完整报告满载丢弃数")
+    @MainActor func reportsDroppedPCMChunks() async {
+        let harness = Harness(bufferCapacity: 1)
+        await harness.coordinator.start(process: Self.process)
+
+        harness.capture.emit(Data([1]))
+        harness.capture.emit(Data([2]))
+
+        #expect(harness.coordinator.droppedChunkCount == 1)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("丢帧计数只在变化时按节流频率发布")
+    @MainActor func throttlesChangedOnlyDroppedChunkPublication() async {
+        #expect(LiveMeetingCoordinator.defaultDropMonitorIntervalNanoseconds >= 250_000_000)
+        let harness = Harness(bufferCapacity: 1, dropMonitorIntervalNanoseconds: 5_000_000)
+        await harness.coordinator.start(process: Self.process)
+        let observation = DropObservationCounter()
+        withObservationTracking {
+            _ = harness.coordinator.droppedChunkCount
+        } onChange: {
+            observation.markChanged()
+        }
+
+        try? await Task<Never, Never>.sleep(nanoseconds: 20_000_000)
+        #expect(observation.changeCount == 0)
+
+        harness.capture.emit(Data([1]))
+        harness.capture.emit(Data([2]))
+        await waitUntil { observation.changeCount == 1 }
+
+        withObservationTracking {
+            _ = harness.coordinator.droppedChunkCount
+        } onChange: {
+            observation.markChanged()
+        }
+        try? await Task<Never, Never>.sleep(nanoseconds: 20_000_000)
+
+        #expect(harness.coordinator.state == .live)
+        #expect(harness.coordinator.droppedChunkCount == 1)
+        #expect(observation.changeCount == 1)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("发送任务失败会停止会议而不会等待自身形成死锁")
+    @MainActor func handlesSenderFailureWithoutDeadlock() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.failSends()
+
+        harness.capture.emit(Data([1]))
+        await waitUntil { harness.coordinator.state == .error }
+
+        #expect(harness.capture.stopCount == 1)
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("采集停止失败后保持队列关闭并拒绝启动重叠会话")
+    @MainActor func keepsQueueClosedAfterCaptureCleanupFailure() async {
+        let harness = Harness(captureStopFailures: 2)
+        await harness.coordinator.start(process: Self.process)
+
+        await harness.coordinator.stop()
+        harness.capture.emit(Data([9]))
+
+        #expect(harness.coordinator.state == .error)
+        #expect(harness.coordinator.droppedChunkCount == 1)
+
+        await harness.coordinator.start(process: Self.process)
+
+        #expect(harness.capture.startedProcessIDs == [Self.process.id])
+        #expect(harness.capture.stopCount == 2)
+        #expect(harness.coordinator.state == .error)
+        harness.coordinator.shutdown()
+    }
+
+    @Test("clear 与新 start 会共同等待延迟清理且旧会话不能清除新会话")
+    @MainActor func clearAndStartJoinDelayedTeardown() async {
+        let capture = FakeLiveCapture()
+        let store = LiveTranscriptStore()
+        let first = FakeLiveTranscriber()
+        let second = FakeLiveTranscriber()
+        var transcribers = [first, second]
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcribers.removeFirst() },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        capture.delayNextStop()
+
+        let clearTask = Task { await coordinator.clearAndClose() }
+        await waitUntil { capture.hasBlockedStop }
+        capture.emit(Data([7]))
+        #expect(coordinator.droppedChunkCount == 1)
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await Task.yield()
+        #expect(capture.startedProcessIDs == [Self.process.id])
+        #expect(await second.connectCount == 0)
+
+        capture.resumeStop()
+        await clearTask.value
+        await startTask.value
+
+        #expect(capture.startedProcessIDs == [Self.process.id, Self.process.id])
+        #expect(await first.sentPCM.isEmpty)
+        #expect(await second.connectCount == 1)
+        #expect(coordinator.state == .live)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("新 start 会等待已开始的延迟 stop 完整结束")
+    @MainActor func startJoinsExistingDelayedStop() async {
+        let capture = FakeLiveCapture()
+        let store = LiveTranscriptStore()
+        let first = FakeLiveTranscriber()
+        let second = FakeLiveTranscriber()
+        var transcribers = [first, second]
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcribers.removeFirst() },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        capture.delayNextStop()
+
+        let stopTask = Task { await coordinator.stop() }
+        await waitUntil { capture.hasBlockedStop }
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await Task.yield()
+
+        #expect(capture.startedProcessIDs == [Self.process.id])
+        #expect(await second.connectCount == 0)
+
+        capture.resumeStop()
+        await stopTask.value
+        await startTask.value
+
+        #expect(capture.startedProcessIDs == [Self.process.id, Self.process.id])
+        #expect(coordinator.state == .live)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("启动失败保留 HAL 资源时立即清理，失败后由 clear 重试且不误报 idle")
+    @MainActor func retriesRetainedCleanupAfterFailedStart() async {
+        let capture = FakeLiveCapture(
+            stopFailures: 1,
+            startFailures: 1,
+            retainsResourcesOnStartFailure: true
+        )
+        let transcriber = FakeLiveTranscriber()
+        let store = LiveTranscriptStore()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        await coordinator.start(process: Self.process)
+
+        #expect(coordinator.state == .error)
+        #expect(capture.hasPendingCaptureResources)
+        #expect(capture.stopCount == 1)
+        capture.emit(Data([8]))
+        #expect(coordinator.droppedChunkCount == 1)
+
+        await coordinator.clearAndClose()
+
+        #expect(!capture.hasPendingCaptureResources)
+        #expect(capture.stopCount == 2)
+        #expect(coordinator.state == .idle)
+        #expect(store.confirmedUtterances.isEmpty)
+    }
+
+    @Test("shutdown 在 HAL 清理前原子关闭队列并丢弃残留回调")
+    @MainActor func shutdownDiscardsResidualCallback() async {
+        let capture = FakeLiveCapture()
+        let transcriber = FakeLiveTranscriber()
+        let store = LiveTranscriptStore()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: store,
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        var discardedDuringEmergency: Int?
+        capture.emergencyPCM = Data([6])
+        capture.onEmergencyEmission = {
+            discardedDuringEmergency = coordinator.droppedChunkCount
+        }
+
+        coordinator.shutdown()
+
+        #expect(discardedDuringEmergency == 1)
+        #expect(!capture.hasPendingCaptureResources)
+        #expect(coordinator.state == .idle)
+        #expect(store.confirmedUtterances.isEmpty)
+        await waitUntil { await transcriber.cancelCount == 1 }
+        #expect(await transcriber.sentPCM.isEmpty)
+    }
+
+    @Test("stop 请求后延迟 ASR 连接失败不能覆盖 review 意图")
+    @MainActor func delayedConnectFailurePreservesStopIntent() async {
+        let capture = FakeLiveCapture()
+        let transcriber = FakeLiveTranscriber()
+        await transcriber.delayNextConnect()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { await transcriber.hasBlockedConnect }
+        await coordinator.stop()
+        #expect(coordinator.state == .review)
+
+        await transcriber.failConnect()
+        await startTask.value
+
+        #expect(coordinator.state == .review)
+        #expect(coordinator.lastError == nil)
+        #expect(capture.startedProcessIDs.isEmpty)
+        #expect(await transcriber.cancelCount == 0)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("clear 请求后延迟 ASR 连接失败不能重复取消或覆盖 idle")
+    @MainActor func delayedConnectFailurePreservesClearIntent() async {
+        let transcriber = FakeLiveTranscriber()
+        await transcriber.delayNextConnect()
+        let coordinator = LiveMeetingCoordinator(
+            capture: FakeLiveCapture(),
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { await transcriber.hasBlockedConnect }
+        await coordinator.clearAndClose()
+        #expect(coordinator.state == .idle)
+        #expect(await transcriber.cancelCount == 1)
+
+        await transcriber.failConnect()
+        await startTask.value
+
+        #expect(coordinator.state == .idle)
+        #expect(coordinator.lastError == nil)
+        #expect(await transcriber.cancelCount == 1)
+    }
+
+    @Test("stop 请求后延迟采集启动失败不能取消已完成的 ASR 或覆盖 review")
+    @MainActor func delayedCaptureFailurePreservesStopIntent() async {
+        let capture = FakeLiveCapture()
+        capture.delayNextStart()
+        let transcriber = FakeLiveTranscriber()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { capture.hasBlockedStart }
+        let stopTask = Task { await coordinator.stop() }
+        await Task.yield()
+        capture.failStart()
+        await startTask.value
+        await stopTask.value
+
+        #expect(coordinator.state == .review)
+        #expect(coordinator.lastError == nil)
+        #expect(capture.stopCount == 1)
+        #expect(await transcriber.finishCount == 1)
+        #expect(await transcriber.cancelCount == 0)
+        await coordinator.clearAndClose()
+    }
+
+    @Test("clear 请求后延迟采集启动失败只能完成既有 discard 清理")
+    @MainActor func delayedCaptureFailurePreservesClearIntent() async {
+        let capture = FakeLiveCapture()
+        capture.delayNextStart()
+        let transcriber = FakeLiveTranscriber()
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+
+        let startTask = Task { await coordinator.start(process: Self.process) }
+        await waitUntil { capture.hasBlockedStart }
+        let clearTask = Task { await coordinator.clearAndClose() }
+        await Task.yield()
+        capture.failStart()
+        await startTask.value
+        await clearTask.value
+
+        #expect(coordinator.state == .idle)
+        #expect(coordinator.lastError == nil)
+        #expect(capture.stopCount == 1)
+        #expect(await transcriber.finishCount == 0)
+        #expect(await transcriber.cancelCount == 1)
+    }
+
+    @Test("discard 清理会取消已取出 PCM 的挂起发送并立即返回")
+    @MainActor func discardCancelsSuspendedSenderPromptly() async {
+        let capture = FakeLiveCapture()
+        let transcriber = FakeLiveTranscriber()
+        await transcriber.delaySends(byNanoseconds: 1_000_000_000)
+        let coordinator = LiveMeetingCoordinator(
+            capture: capture,
+            transcriptStore: LiveTranscriptStore(),
+            transcriberFactory: { transcriber },
+            configurationProvider: { Self.configuration },
+            processObserver: FakeMeetingProcessObserver()
+        )
+        await coordinator.start(process: Self.process)
+        capture.emit(Data([4]))
+        await waitUntil { await transcriber.sendAttemptCount == 1 }
+        let stopTask = Task { await coordinator.stop() }
+        await waitUntil { capture.stopCount == 1 }
+
+        var clearCompleted = false
+        let clearTask = Task {
+            await coordinator.clearAndClose()
+            clearCompleted = true
+        }
+        try? await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
+
+        #expect(clearCompleted)
+        await clearTask.value
+        await stopTask.value
+        #expect(await transcriber.sentPCM.isEmpty)
+        #expect(coordinator.state == .idle)
+    }
+
+    @Test("终端重连失败后清理会对账供应商未发送音频")
+    @MainActor func reconcilesProviderDiscardAfterTerminalReconnectFailure() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.requireReconnectDiscard(
+            sequence: 1,
+            discardedChunkCount: 1
+        )
+        await harness.transcriber.failSends()
+
+        harness.capture.emit(Data([5]))
+        await waitUntil { harness.coordinator.state == .error }
+
+        #expect(harness.coordinator.droppedChunkCount == 1)
+        #expect(await harness.transcriber.acknowledgedDiscardSequences == [1])
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("cancel 清理会先中断卡住的重连再等待发送任务")
+    @MainActor func cancelTeardownUnblocksStuckReconnectBeforeJoiningSender() async {
+        let harness = Harness()
+        await harness.transcriber.blockSendsUntilCancel()
+        await harness.coordinator.start(process: Self.process)
+        harness.capture.emit(Data([6]))
+        await waitUntil { await harness.transcriber.hasBlockedSend }
+
+        var clearCompleted = false
+        let clearTask = Task {
+            await harness.coordinator.clearAndClose()
+            clearCompleted = true
+        }
+        try? await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
+
+        #expect(clearCompleted)
+        if !clearCompleted {
+            await harness.transcriber.releaseBlockedSend()
+        }
+        await clearTask.value
+        #expect(await harness.transcriber.cancelCount == 1)
+        #expect(await harness.transcriber.sentPCM.isEmpty)
+        #expect(harness.coordinator.state == .idle)
+    }
+
+    @Test("应用退出同步停止采集并清空所有会议内存")
+    @MainActor func shutdownClearsEverything() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.emit(.partial(
+            id: "partial",
+            speakerID: "1",
+            text: "临时字幕",
+            startMS: 0,
+            endMS: 500
+        ))
+        await harness.transcriber.emit(.confirmed(
+            id: "confirmed",
+            speakerID: "1",
+            text: "最终字幕",
+            startMS: 0,
+            endMS: 1_000
+        ))
+        await waitUntil {
+            harness.store.partialUtterance != nil
+                && harness.store.confirmedUtterances.count == 1
+        }
+
+        harness.coordinator.shutdown()
+
+        #expect(harness.coordinator.state == .idle)
+        #expect(harness.coordinator.droppedChunkCount == 0)
+        #expect(harness.store.partialUtterance == nil)
+        #expect(harness.store.confirmedUtterances.isEmpty)
+        #expect(harness.capture.emergencyStopCount == 1)
+        await waitUntil { await harness.transcriber.cancelCount == 1 }
+    }
+}
+
+private extension LiveMeetingCoordinatorTests {
+    static let process = AudioProcessInfo(
+        id: AudioObjectID(42),
+        pid: pid_t(4_242),
+        name: "Meeting",
+        bundleID: "example.meeting"
+    )
+
+    static let configuration = ASRConfiguration(
+        appID: "test-app",
+        secretID: "test-id",
+        secretKey: "test-key",
+        voiceID: "test-voice"
+    )
+
+    @MainActor
+    final class Harness {
+        let capture: FakeLiveCapture
+        let transcriber: FakeLiveTranscriber
+        let store: LiveTranscriptStore
+        let coordinator: LiveMeetingCoordinator
+
+        init(
+            recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder(),
+            bufferCapacity: Int = 8,
+            captureStopFailures: Int = 0,
+            dropMonitorIntervalNanoseconds: UInt64 = LiveMeetingCoordinator
+                .defaultDropMonitorIntervalNanoseconds
+        ) {
+            capture = FakeLiveCapture(
+                recorder: recorder,
+                stopFailures: captureStopFailures
+            )
+            transcriber = FakeLiveTranscriber(recorder: recorder)
+            store = LiveTranscriptStore()
+            coordinator = LiveMeetingCoordinator(
+                capture: capture,
+                transcriptStore: store,
+                transcriberFactory: { [transcriber] in transcriber },
+                configurationProvider: { LiveMeetingCoordinatorTests.configuration },
+                processObserver: FakeMeetingProcessObserver(),
+                bufferCapacity: bufferCapacity,
+                dropMonitorIntervalNanoseconds: dropMonitorIntervalNanoseconds
+            )
+        }
+    }
+
+    @MainActor
+    static func waitUntil(
+        attempts: Int = 200,
+        condition: @escaping @MainActor () async -> Bool
+    ) async {
+        for _ in 0..<attempts {
+            if await condition() { return }
+            try? await Task<Never, Never>.sleep(nanoseconds: 1_000_000)
+        }
+        Issue.record("Condition did not become true")
+    }
+}
+
+private enum FakeAssistantError: Error {
+    case unavailable
+}
+
+private final class MutableCoordinatorMeetingClock: MeetingSessionClock, @unchecked Sendable {
+    var elapsedTime: TimeInterval
+
+    init(elapsedTime: TimeInterval) {
+        self.elapsedTime = elapsedTime
+    }
+}
+
+private final class DropObservationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var changes = 0
+
+    var changeCount: Int {
+        lock.withLock { changes }
+    }
+
+    func markChanged() {
+        lock.withLock { changes += 1 }
+    }
+}
+
+private enum FakeCoordinatorError: Error {
+    case failed
+}
+
+private actor CoordinatorOperationRecorder {
+    private(set) var operations: [String] = []
+
+    func append(_ operation: String) {
+        operations.append(operation)
+    }
+}
+
+@MainActor
+private final class FakeLiveCapture: LiveAudioCapturing {
+    private let recorder: CoordinatorOperationRecorder
+    private var sink: (@Sendable (Data) -> Void)?
+
+    private(set) var startedProcessIDs: [AudioObjectID] = []
+    private(set) var stopCount = 0
+    private(set) var emergencyStopCount = 0
+    private var stopFailures: Int
+    private var startFailures: Int
+    private let retainsResourcesOnStartFailure: Bool
+    private var delayStop = false
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var delayStart = false
+    private var startContinuation: CheckedContinuation<Void, Error>?
+    private(set) var hasPendingCaptureResources = false
+    var emergencyPCM: Data?
+    var onEmergencyEmission: (() -> Void)?
+
+    init(
+        recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder(),
+        stopFailures: Int = 0,
+        startFailures: Int = 0,
+        retainsResourcesOnStartFailure: Bool = false
+    ) {
+        self.recorder = recorder
+        self.stopFailures = stopFailures
+        self.startFailures = startFailures
+        self.retainsResourcesOnStartFailure = retainsResourcesOnStartFailure
+    }
+
+    func startLiveCapture(
+        processObjectID: AudioObjectID,
+        onPCM: @escaping @Sendable (Data) -> Void
+    ) async throws {
+        startedProcessIDs.append(processObjectID)
+        sink = onPCM
+        hasPendingCaptureResources = true
+        await recorder.append("capture.start")
+        if delayStart {
+            delayStart = false
+            try await withCheckedThrowingContinuation { continuation in
+                startContinuation = continuation
+            }
+        }
+        if startFailures > 0 {
+            startFailures -= 1
+            if !retainsResourcesOnStartFailure {
+                hasPendingCaptureResources = false
+                sink = nil
+            }
+            throw FakeCoordinatorError.failed
+        }
+    }
+
+    func stopCapture() async throws {
+        stopCount += 1
+        await recorder.append("capture.stop")
+        if delayStop {
+            delayStop = false
+            await withCheckedContinuation { continuation in
+                stopContinuation = continuation
+            }
+        }
+        if stopFailures > 0 {
+            stopFailures -= 1
+            throw FakeCoordinatorError.failed
+        }
+        hasPendingCaptureResources = false
+        sink = nil
+    }
+
+    func emergencyStop() {
+        emergencyStopCount += 1
+        if let emergencyPCM {
+            sink?(emergencyPCM)
+            onEmergencyEmission?()
+        }
+        hasPendingCaptureResources = false
+        sink = nil
+    }
+
+    func emit(_ data: Data) {
+        sink?(data)
+    }
+
+    var hasBlockedStop: Bool { stopContinuation != nil }
+    var hasBlockedStart: Bool { startContinuation != nil }
+
+    func delayNextStart() {
+        delayStart = true
+    }
+
+    func failStart() {
+        let continuation = startContinuation
+        startContinuation = nil
+        continuation?.resume(throwing: FakeCoordinatorError.failed)
+    }
+
+    func delayNextStop() {
+        delayStop = true
+    }
+
+    func resumeStop() {
+        let continuation = stopContinuation
+        stopContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionStateReporting {
+    nonisolated let eventStream: AsyncThrowingStream<TranscriptEvent, Error>
+    private let continuation: AsyncThrowingStream<TranscriptEvent, Error>.Continuation
+    nonisolated let connectionStateStream: AsyncStream<LiveTranscriberConnectionState>
+    private let connectionStateContinuation: AsyncStream<LiveTranscriberConnectionState>.Continuation
+    private let recorder: CoordinatorOperationRecorder
+
+    private(set) var connectCount = 0
+    private(set) var cancelCount = 0
+    private(set) var finishCount = 0
+    private(set) var sentPCM: [Data] = []
+    private(set) var sendAttemptCount = 0
+    private var sendsFail = false
+    private var delayConnect = false
+    private var connectContinuation: CheckedContinuation<Void, Error>?
+    private var sendDelayNanoseconds: UInt64 = 0
+    private var reconnectDiscard: (sequence: Int, chunkCount: Int)?
+    private(set) var acknowledgedDiscardSequences: [Int] = []
+    private var blocksSendsUntilCancel = false
+    private var blockedSendContinuation: CheckedContinuation<Void, Never>?
+    private var wasCancelled = false
+
+    init(recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder()) {
+        let pair = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
+        eventStream = pair.stream
+        continuation = pair.continuation
+        let statePair = AsyncStream<LiveTranscriberConnectionState>.makeStream()
+        connectionStateStream = statePair.stream
+        connectionStateContinuation = statePair.continuation
+        self.recorder = recorder
+    }
+
+    func connect(configuration: ASRConfiguration) async throws {
+        connectCount += 1
+        await recorder.append("asr.connect")
+        if delayConnect {
+            delayConnect = false
+            try await withCheckedThrowingContinuation { continuation in
+                connectContinuation = continuation
+            }
+        }
+        connectionStateContinuation.yield(.live)
+    }
+
+    func send(_ pcm: Data) async throws -> LiveTranscriberSendResult {
+        sendAttemptCount += 1
+        if sendDelayNanoseconds > 0 {
+            try await Task<Never, Never>.sleep(
+                nanoseconds: sendDelayNanoseconds
+            )
+        }
+        if blocksSendsUntilCancel {
+            await withCheckedContinuation { continuation in
+                blockedSendContinuation = continuation
+            }
+        }
+        if wasCancelled { throw CancellationError() }
+        if sendsFail { throw FakeCoordinatorError.failed }
+        if let reconnectDiscard {
+            return .reconnectDiscardRequired(
+                sequence: reconnectDiscard.sequence,
+                discardedChunkCount: reconnectDiscard.chunkCount
+            )
+        }
+        sentPCM.append(pcm)
+        await recorder.append("asr.send")
+        return .sent
+    }
+
+    func reconnectDiscardStatus() -> LiveTranscriberSendResult? {
+        guard let reconnectDiscard else { return nil }
+        return .reconnectDiscardRequired(
+            sequence: reconnectDiscard.sequence,
+            discardedChunkCount: reconnectDiscard.chunkCount
+        )
+    }
+
+    func acknowledgeReconnectDiscard(sequence: Int) -> Int {
+        acknowledgedDiscardSequences.append(sequence)
+        guard let reconnectDiscard,
+              reconnectDiscard.sequence == sequence
+        else { return 0 }
+        self.reconnectDiscard = nil
+        return reconnectDiscard.chunkCount
+    }
+
+    nonisolated func events() -> AsyncThrowingStream<TranscriptEvent, Error> {
+        eventStream
+    }
+
+    nonisolated func connectionStateUpdates() -> AsyncStream<LiveTranscriberConnectionState> {
+        connectionStateStream
+    }
+
+    func finish() async {
+        finishCount += 1
+        await recorder.append("asr.finish")
+        continuation.finish()
+    }
+
+    func cancel() async {
+        cancelCount += 1
+        wasCancelled = true
+        await recorder.append("asr.cancel")
+        blockedSendContinuation?.resume()
+        blockedSendContinuation = nil
+        continuation.finish()
+    }
+
+    func emit(_ event: TranscriptEvent) {
+        continuation.yield(event)
+    }
+
+    func fail(_ error: Error) {
+        continuation.finish(throwing: error)
+    }
+
+    func emitConnectionState(_ state: LiveTranscriberConnectionState) {
+        connectionStateContinuation.yield(state)
+    }
+
+    func failSends() {
+        sendsFail = true
+    }
+
+    var hasBlockedConnect: Bool { connectContinuation != nil }
+
+    func delayNextConnect() {
+        delayConnect = true
+    }
+
+    func failConnect() {
+        let continuation = connectContinuation
+        connectContinuation = nil
+        continuation?.resume(throwing: FakeCoordinatorError.failed)
+    }
+
+    func delaySends(byNanoseconds nanoseconds: UInt64) {
+        sendDelayNanoseconds = nanoseconds
+    }
+
+    func requireReconnectDiscard(sequence: Int, discardedChunkCount: Int) {
+        reconnectDiscard = (sequence, discardedChunkCount)
+    }
+
+    var hasBlockedSend: Bool { blockedSendContinuation != nil }
+
+    func blockSendsUntilCancel() {
+        blocksSendsUntilCancel = true
+    }
+
+    func releaseBlockedSend() {
+        blocksSendsUntilCancel = false
+        blockedSendContinuation?.resume()
+        blockedSendContinuation = nil
+    }
+}
+
+@MainActor
+private final class FakeMeetingProcessObserver: LiveMeetingProcessObserving {
+    private var handler: (@MainActor @Sendable () -> Void)?
+
+    func observeExit(
+        of processID: pid_t,
+        handler: @escaping @MainActor @Sendable () -> Void
+    ) {
+        self.handler = handler
+    }
+
+    func stopObserving() {
+        handler = nil
+    }
+
+    func emitExit() {
+        handler?()
+    }
+}

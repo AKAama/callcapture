@@ -8,6 +8,7 @@ enum CaptureError: LocalizedError {
     case fileWriterInitFailed(underlying: Error)
     case alreadyRecording
     case notRecording
+    case ioProcCleanupFailed(stopStatus: OSStatus, destroyStatus: OSStatus)
     case finalizationFailed(underlying: Error)
 
     var errorDescription: String? {
@@ -26,6 +27,10 @@ enum CaptureError: LocalizedError {
             "A recording is already in progress."
         case .notRecording:
             "No recording is in progress."
+        case .ioProcCleanupFailed(let stopStatus, let destroyStatus):
+            "Failed to release the audio IO callback "
+            + "(stop OSStatus: \(stopStatus), destroy OSStatus: \(destroyStatus)). "
+            + "Capture resources were retained so cleanup can be retried."
         case .finalizationFailed(let error):
             "Failed to finalize audio file: \(error.localizedDescription)"
         }

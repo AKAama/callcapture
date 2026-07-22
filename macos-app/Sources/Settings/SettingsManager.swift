@@ -10,6 +10,10 @@ import OSLog
 @Observable
 final class SettingsManager {
 
+    static let tencentASRAppIDAccount = "tencent_asr_app_id"
+    static let tencentASRSecretIDAccount = "tencent_asr_secret_id"
+    static let tencentASRSecretKeyAccount = "tencent_asr_secret_key"
+
     var defaultEngine: TranscriptionEngine = .localWhisper { didSet { persist("default_engine", defaultEngine.rawValue) } }
     var whisperModel: WhisperModel = .base { didSet { persist("whisper_model", whisperModel.rawValue) } }
     var remoteProvider: RemoteProvider = .groq { didSet { persist("remote_provider", remoteProvider.rawValue) } }
@@ -17,8 +21,7 @@ final class SettingsManager {
     /// Legacy single-key field, used by Groq/OpenAI Whisper.
     var remoteApiKey: String = "" {
         didSet {
-            KeychainHelper.save(remoteApiKey, for: "remote_api_key")
-            persist("remote_api_key", "keychain")
+            saveSecretIfReady(remoteApiKey, for: "remote_api_key")
         }
     }
 
@@ -27,16 +30,14 @@ final class SettingsManager {
     /// pick between them at transcribe time based on `session.language`.
     var assemblyAIApiKey: String = "" {
         didSet {
-            KeychainHelper.save(assemblyAIApiKey, for: "assemblyai_api_key")
-            persist("assemblyai_api_key", "keychain")
+            saveSecretIfReady(assemblyAIApiKey, for: "assemblyai_api_key")
         }
     }
 
     /// Deepgram key (see `assemblyAIApiKey`).
     var deepgramApiKey: String = "" {
         didSet {
-            KeychainHelper.save(deepgramApiKey, for: "deepgram_api_key")
-            persist("deepgram_api_key", "keychain")
+            saveSecretIfReady(deepgramApiKey, for: "deepgram_api_key")
         }
     }
 
@@ -44,8 +45,7 @@ final class SettingsManager {
 
     var llmApiKey: String = "" {
         didSet {
-            KeychainHelper.save(llmApiKey, for: "llm_api_key")
-            persist("llm_api_key", "keychain")
+            saveSecretIfReady(llmApiKey, for: "llm_api_key")
         }
     }
 
@@ -53,8 +53,7 @@ final class SettingsManager {
 
     var openRouterApiKey: String = "" {
         didSet {
-            KeychainHelper.save(openRouterApiKey, for: "openrouter_api_key")
-            persist("openrouter_api_key", "keychain")
+            saveSecretIfReady(openRouterApiKey, for: "openrouter_api_key")
         }
     }
 
@@ -64,6 +63,78 @@ final class SettingsManager {
 
     var localLLMBaseURL: String = "http://localhost:11434/v1" {
         didSet { persist("local_llm_base_url", localLLMBaseURL) }
+    }
+
+    // MARK: - Real-time Meeting Assistant
+
+    var tencentASRAppID: String = "" {
+        didSet {
+            saveSecretIfReady(tencentASRAppID, for: Self.tencentASRAppIDAccount)
+        }
+    }
+    var tencentASRSecretID: String = "" {
+        didSet {
+            saveSecretIfReady(tencentASRSecretID, for: Self.tencentASRSecretIDAccount)
+        }
+    }
+    var tencentASRSecretKey: String = "" {
+        didSet {
+            saveSecretIfReady(tencentASRSecretKey, for: Self.tencentASRSecretKeyAccount)
+        }
+    }
+
+    var assistantShortcutEnabled: Bool = true {
+        didSet { persist("assistant_shortcut_enabled", String(assistantShortcutEnabled)) }
+    }
+    var assistantShortcutPreset: AssistantShortcutPreset = .default {
+        didSet { persist("assistant_shortcut_preset", assistantShortcutPreset.rawValue) }
+    }
+
+    var assistantLLMPreset: LLMProviderPreset = .openRouter {
+        didSet { persist("assistant_llm_preset", assistantLLMPreset.rawValue) }
+    }
+    var assistantLLMBaseURL: String = LLMProviderPreset.openRouter.defaultBaseURL {
+        didSet { persist("assistant_llm_base_url", assistantLLMBaseURL) }
+    }
+    var assistantLLMModel: String = LLMProviderPreset.openRouter.defaultModel {
+        didSet { persist("assistant_llm_model", assistantLLMModel) }
+    }
+    var assistantLLMAPIKey: String = "" {
+        didSet {
+            saveSecretIfReady(assistantLLMAPIKey, for: LLMConfiguration.keychainAccount)
+        }
+    }
+    var assistantLLMTimeout: Double = 30 {
+        didSet { persist("assistant_llm_timeout", String(assistantLLMTimeout)) }
+    }
+    var assistantLLMMaxTokens: Int = 600 {
+        didSet { persist("assistant_llm_max_tokens", String(assistantLLMMaxTokens)) }
+    }
+    var assistantLLMTemperature: Double = 0.3 {
+        didSet { persist("assistant_llm_temperature", String(assistantLLMTemperature)) }
+    }
+    /// Prompt text remains memory-only under the assistant privacy boundary.
+    var assistantSystemPrompt: String = SettingsManager.defaultAssistantSystemPrompt
+
+    var assistantLLMConfiguration: LLMConfiguration {
+        LLMConfiguration(
+            preset: assistantLLMPreset,
+            baseURL: assistantLLMBaseURL,
+            model: assistantLLMModel,
+            apiKey: assistantLLMAPIKey,
+            timeout: assistantLLMTimeout,
+            maxTokens: assistantLLMMaxTokens,
+            temperature: assistantLLMTemperature,
+            systemPrompt: assistantSystemPrompt,
+            contextDuration: MeetingAssistant.defaultContextDuration
+        )
+    }
+
+    func applyAssistantLLMPreset(_ preset: LLMProviderPreset) {
+        assistantLLMPreset = preset
+        guard preset != .custom else { return }
+        assistantLLMBaseURL = preset.defaultBaseURL
+        assistantLLMModel = preset.defaultModel
     }
 
     // MARK: - Pricing (USD). Defaults mirror python-worker/app/postprocess/pricing.py.
@@ -102,17 +173,34 @@ final class SettingsManager {
     var markdownProfile: MarkdownProfile = .meetingNotes { didSet { persist("markdown_profile", markdownProfile.rawValue) } }
 
     private let database: AppDatabase
+    private let loadSecret: (String) -> String
+    private let saveSecret: (String, String) -> Void
+    private var isLoadingSecrets = false
     private static let logger = Logger(
         subsystem: "com.callcapture.app",
         category: "SettingsManager"
     )
 
+    private static let defaultAssistantSystemPrompt = """
+        Give concise, practical help for a live meeting. Offer a few useful ideas and, when helpful, a short phrase the user can say directly.
+        """
+
     /// Creates the settings manager and loads persisted values.
     ///
     /// - Parameter database: The GRDB-backed application database.
-    init(database: AppDatabase) {
+    init(
+        database: AppDatabase,
+        loadSecret: @escaping (String) -> String = { KeychainHelper.load(for: $0) },
+        saveSecret: @escaping (String, String) -> Void = { value, account in
+            KeychainHelper.save(value, for: account)
+        }
+    ) {
         self.database = database
+        self.loadSecret = loadSecret
+        self.saveSecret = saveSecret
+        isLoadingSecrets = true
         loadAll()
+        isLoadingSecrets = false
     }
 
     // MARK: - Private Helpers
@@ -138,6 +226,12 @@ final class SettingsManager {
         } catch {
             Self.logger.error("Failed to persist setting '\(key)': \(error)")
         }
+    }
+
+    private func saveSecretIfReady(_ value: String, for account: String) {
+        guard !isLoadingSecrets else { return }
+        saveSecret(value, account)
+        persist(account, "keychain")
     }
 
     private func loadAll() {
@@ -173,6 +267,17 @@ final class SettingsManager {
         if let raw = rows["llm_provider"], let val = LLMProvider(rawValue: raw) { llmProvider = val }
         if let raw = rows["llm_model"], !raw.isEmpty { llmModel = raw }
         if let raw = rows["local_llm_base_url"], !raw.isEmpty { localLLMBaseURL = raw }
+        if let raw = rows["assistant_llm_preset"], let val = LLMProviderPreset(rawValue: raw) { assistantLLMPreset = val }
+        if let raw = rows["assistant_llm_base_url"] { assistantLLMBaseURL = raw }
+        if let raw = rows["assistant_llm_model"] { assistantLLMModel = raw }
+        if let raw = rows["assistant_llm_timeout"], let val = Double(raw) { assistantLLMTimeout = val }
+        if let raw = rows["assistant_llm_max_tokens"], let val = Int(raw) { assistantLLMMaxTokens = val }
+        if let raw = rows["assistant_llm_temperature"], let val = Double(raw) { assistantLLMTemperature = val }
+        if let raw = rows["assistant_shortcut_enabled"] { assistantShortcutEnabled = raw == "true" }
+        if let raw = rows["assistant_shortcut_preset"],
+           let val = AssistantShortcutPreset(rawValue: raw) {
+            assistantShortcutPreset = val
+        }
         if let raw = rows["stt_rate_assemblyai"], let v = Double(raw) { sttRateAssemblyAI = v }
         if let raw = rows["stt_rate_deepgram"], let v = Double(raw) { sttRateDeepgram = v }
         if let raw = rows["stt_rate_openai"], let v = Double(raw) { sttRateOpenAI = v }
@@ -180,11 +285,15 @@ final class SettingsManager {
         if let raw = rows["llm_fallback_rate_per_1m"], let v = Double(raw) { llmFallbackRatePer1M = v }
 
         // API keys live in Keychain, not SQLite.
-        remoteApiKey = KeychainHelper.load(for: "remote_api_key")
-        assemblyAIApiKey = KeychainHelper.load(for: "assemblyai_api_key")
-        deepgramApiKey = KeychainHelper.load(for: "deepgram_api_key")
-        llmApiKey = KeychainHelper.load(for: "llm_api_key")
-        openRouterApiKey = KeychainHelper.load(for: "openrouter_api_key")
+        remoteApiKey = loadSecret("remote_api_key")
+        assemblyAIApiKey = loadSecret("assemblyai_api_key")
+        deepgramApiKey = loadSecret("deepgram_api_key")
+        llmApiKey = loadSecret("llm_api_key")
+        openRouterApiKey = loadSecret("openrouter_api_key")
+        assistantLLMAPIKey = loadSecret(LLMConfiguration.keychainAccount)
+        tencentASRAppID = loadSecret(Self.tencentASRAppIDAccount)
+        tencentASRSecretID = loadSecret(Self.tencentASRSecretIDAccount)
+        tencentASRSecretKey = loadSecret(Self.tencentASRSecretKeyAccount)
 
         Self.logger.info("Settings loaded (\(rows.count) persisted keys)")
     }

@@ -12,6 +12,7 @@ import OSLog
 ///   (SIGTERM/SIGINT) the audio capture and any running Python worker child
 ///   process are torn down so they do not leak.
 @available(macOS 14.2, *)
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var signalSources: [DispatchSourceSignal] = []
@@ -23,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if terminateIfDuplicateInstance() { return }
+        AppModel.shared?.startRuntime()
         installSignalHandlers()
         Self.logger.info("AppDelegate launched (single instance confirmed)")
     }
@@ -81,9 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             )
             source.setEventHandler {
-                Self.logger.warning("Caught signal \(sig); tearing down and exiting")
-                AppModel.shared?.teardownForExit()
-                exit(0)
+                Task { @MainActor in
+                    Self.logger.warning("Caught signal \(sig); tearing down and exiting")
+                    AppModel.shared?.teardownForExit()
+                    exit(0)
+                }
             }
             source.resume()
             signalSources.append(source)
