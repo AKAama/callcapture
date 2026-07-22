@@ -128,7 +128,6 @@ private struct LiveMeetingTeardownOutcome: Sendable {
 
 private struct LiveMeetingTeardownOperation {
     let id: UUID
-    let transcriberPolicy: TranscriberTerminationPolicy
     let task: Task<LiveMeetingTeardownOutcome, Never>
 }
 
@@ -645,13 +644,14 @@ private extension LiveMeetingCoordinator {
             session.senderTask?.cancel()
         }
 
+        if transcriberPolicy == .cancel {
+            session.eventTask?.cancel()
+            session.eventTask = nil
+            await session.transcriber.cancel()
+        }
+
         if let operation = session.teardownOperation {
             let outcome = await operation.task.value
-            if transcriberPolicy == .cancel,
-               operation.transcriberPolicy != .cancel {
-                session.eventTask?.cancel()
-                await session.transcriber.cancel()
-            }
             clearTeardownOperation(operation.id, from: session)
             return outcome
         }
@@ -683,6 +683,7 @@ private extension LiveMeetingCoordinator {
             }
             await session.senderTask?.value
             session.senderTask = nil
+            await self.reconcileReconnectDiscardIfNeeded(for: session)
             self.mirrorDroppedChunkCount(from: session)
             session.dropMonitorTask?.cancel()
             session.dropMonitorTask = nil
@@ -692,10 +693,9 @@ private extension LiveMeetingCoordinator {
             switch transcriberPolicy {
             case .finish:
                 await session.transcriber.finish()
+                await self.reconcileReconnectDiscardIfNeeded(for: session)
             case .cancel:
-                session.eventTask?.cancel()
-                session.eventTask = nil
-                await session.transcriber.cancel()
+                await self.reconcileReconnectDiscardIfNeeded(for: session)
             }
 
             return LiveMeetingTeardownOutcome(
@@ -704,7 +704,6 @@ private extension LiveMeetingCoordinator {
         }
         let operation = LiveMeetingTeardownOperation(
             id: operationID,
-            transcriberPolicy: transcriberPolicy,
             task: task
         )
         session.teardownOperation = operation
@@ -719,6 +718,13 @@ private extension LiveMeetingCoordinator {
     ) {
         guard session.teardownOperation?.id == operationID else { return }
         session.teardownOperation = nil
+    }
+
+    func reconcileReconnectDiscardIfNeeded(for session: LiveMeetingSession) async {
+        guard isActive(session),
+              let discard = await session.transcriber.reconnectDiscardStatus()
+        else { return }
+        await handleReconnectDiscard(discard, for: session)
     }
 
     func transition(to newState: LiveConnectionState) {

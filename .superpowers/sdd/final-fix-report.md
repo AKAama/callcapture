@@ -157,3 +157,57 @@ The permanent suites now cover:
 - `git diff --check`: passed.
 - Changed-source privacy/log scan found no added logging of PCM, transcript,
   credentials, signed URLs, prompts, or replies.
+
+## Final-gate fixes: exact provider loss and cancel-first teardown
+
+Provider discard accounting is now defined as the number of capture-source
+chunks that still contain at least one byte not accepted by the old transport.
+Tencent tracks each source chunk's remaining byte count while 6,400-byte
+provider frames consume data across callback boundaries. If an old-socket send
+finishes successfully after recovery has begun, those accepted bytes are
+subtracted from the quarantine before its count is reported. A reconnect
+barrier is retained through terminal failure/cancellation until the coordinator
+reconciles and acknowledges it during teardown, including when the sender task
+has already exited with an error.
+
+Discard teardown now cancels the event task and transcriber before joining the
+sender. Tencent reconnect waiters are explicitly resumed by cancellation, so a
+sender blocked behind a reconnect scheduler/backoff does not rely on cooperative
+task cancellation from that scheduler. Graceful stop retains the finish-only
+path and does not call cancel.
+
+### Final-gate TDD evidence
+
+The production accounting runtime regression failed before the change with:
+
+`RED: expected 1 unsent source chunk, reported 2`
+
+It uses non-divisible 9,000-byte and 5,400-byte callbacks, consumes a
+cross-boundary 6,400-byte frame, and lets that old-socket send complete after
+recovery begins. The standalone teardown-order regression also failed before
+the change with:
+
+`RED: cancel teardown awaited sender before transcriber cancellation`
+
+Permanent tests now cover exact source-boundary accounting, terminal reconnect
+failure reconciliation, cancel teardown with a send blocked behind reconnect,
+and the graceful finish-versus-cancel distinction.
+
+### Final-gate verification
+
+- Fresh production exact-accounting smoke: passed with
+  `exact-discard-accounting-runtime-smoke-pass`.
+- Fresh production stuck-reconnect cancellation smoke: passed with
+  `stuck-reconnect-cancel-runtime-smoke-pass`.
+- Fresh cancel-first teardown-order smoke: passed with
+  `cancel-first-teardown-runtime-smoke-pass`.
+- Fresh full strict-concurrency build with warning diagnostics: passed
+  (`Build complete! (9.82s)`). Reported warnings are pre-existing and outside
+  the changed live-transcription sources.
+- `swiftc -frontend -parse` over all production and test Swift sources: passed.
+- `git diff --check`: passed.
+- Changed-source privacy/log scan found no added logging calls or credential,
+  secret, or signed-URL logging.
+- Focused `swift test` remains host-blocked before test execution by
+  `error: no such module 'Testing'`; no product or test compile failure was
+  observed beyond that missing toolchain module.

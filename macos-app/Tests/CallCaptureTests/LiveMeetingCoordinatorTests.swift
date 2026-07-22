@@ -33,6 +33,8 @@ struct LiveMeetingCoordinatorTests {
         #expect(operations.contains("asr.send"))
         #expect(operations.firstIndex(of: "capture.stop")! < operations.firstIndex(of: "asr.finish")!)
         #expect(operations.firstIndex(of: "asr.send")! < operations.firstIndex(of: "asr.finish")!)
+        #expect(await harness.transcriber.finishCount == 1)
+        #expect(await harness.transcriber.cancelCount == 0)
         await harness.coordinator.clearAndClose()
     }
 
@@ -556,6 +558,49 @@ struct LiveMeetingCoordinatorTests {
         #expect(coordinator.state == .idle)
     }
 
+    @Test("终端重连失败后清理会对账供应商未发送音频")
+    @MainActor func reconcilesProviderDiscardAfterTerminalReconnectFailure() async {
+        let harness = Harness()
+        await harness.coordinator.start(process: Self.process)
+        await harness.transcriber.requireReconnectDiscard(
+            sequence: 1,
+            discardedChunkCount: 1
+        )
+        await harness.transcriber.failSends()
+
+        harness.capture.emit(Data([5]))
+        await waitUntil { harness.coordinator.state == .error }
+
+        #expect(harness.coordinator.droppedChunkCount == 1)
+        #expect(await harness.transcriber.acknowledgedDiscardSequences == [1])
+        await harness.coordinator.clearAndClose()
+    }
+
+    @Test("cancel 清理会先中断卡住的重连再等待发送任务")
+    @MainActor func cancelTeardownUnblocksStuckReconnectBeforeJoiningSender() async {
+        let harness = Harness()
+        await harness.transcriber.blockSendsUntilCancel()
+        await harness.coordinator.start(process: Self.process)
+        harness.capture.emit(Data([6]))
+        await waitUntil { await harness.transcriber.hasBlockedSend }
+
+        var clearCompleted = false
+        let clearTask = Task {
+            await harness.coordinator.clearAndClose()
+            clearCompleted = true
+        }
+        try? await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
+
+        #expect(clearCompleted)
+        if !clearCompleted {
+            await harness.transcriber.releaseBlockedSend()
+        }
+        await clearTask.value
+        #expect(await harness.transcriber.cancelCount == 1)
+        #expect(await harness.transcriber.sentPCM.isEmpty)
+        #expect(harness.coordinator.state == .idle)
+    }
+
     @Test("应用退出同步停止采集并清空所有会议内存")
     @MainActor func shutdownClearsEverything() async {
         let harness = Harness()
@@ -815,6 +860,9 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
     private var sendDelayNanoseconds: UInt64 = 0
     private var reconnectDiscard: (sequence: Int, chunkCount: Int)?
     private(set) var acknowledgedDiscardSequences: [Int] = []
+    private var blocksSendsUntilCancel = false
+    private var blockedSendContinuation: CheckedContinuation<Void, Never>?
+    private var wasCancelled = false
 
     init(recorder: CoordinatorOperationRecorder = CoordinatorOperationRecorder()) {
         let pair = AsyncThrowingStream<TranscriptEvent, Error>.makeStream()
@@ -845,6 +893,12 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
                 nanoseconds: sendDelayNanoseconds
             )
         }
+        if blocksSendsUntilCancel {
+            await withCheckedContinuation { continuation in
+                blockedSendContinuation = continuation
+            }
+        }
+        if wasCancelled { throw CancellationError() }
         if sendsFail { throw FakeCoordinatorError.failed }
         if let reconnectDiscard {
             return .reconnectDiscardRequired(
@@ -890,7 +944,10 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
 
     func cancel() async {
         cancelCount += 1
+        wasCancelled = true
         await recorder.append("asr.cancel")
+        blockedSendContinuation?.resume()
+        blockedSendContinuation = nil
         continuation.finish()
     }
 
@@ -928,6 +985,18 @@ private actor FakeLiveTranscriber: LiveTranscriber, LiveTranscriberConnectionSta
 
     func requireReconnectDiscard(sequence: Int, discardedChunkCount: Int) {
         reconnectDiscard = (sequence, discardedChunkCount)
+    }
+
+    var hasBlockedSend: Bool { blockedSendContinuation != nil }
+
+    func blockSendsUntilCancel() {
+        blocksSendsUntilCancel = true
+    }
+
+    func releaseBlockedSend() {
+        blocksSendsUntilCancel = false
+        blockedSendContinuation?.resume()
+        blockedSendContinuation = nil
     }
 }
 

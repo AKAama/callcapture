@@ -29,6 +29,8 @@ struct ASRConfiguration: Sendable {
 /// Provider-neutral interface for a live speech-to-text connection.
 enum LiveTranscriberSendResult: Equatable, Sendable {
     case sent
+    /// `discardedChunkCount` counts capture-source chunks that still contain
+    /// at least one byte not accepted by the old transport connection.
     case reconnectDiscardRequired(sequence: Int, discardedChunkCount: Int)
 }
 

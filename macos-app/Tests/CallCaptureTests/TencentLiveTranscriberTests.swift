@@ -426,8 +426,8 @@ struct TencentLiveTranscriberTests {
             await transcriber.cancel()
             return
         }
-        #expect(discardedChunkCount == 1)
-        await transcriber.acknowledgeReconnectDiscard(sequence: sequence)
+        #expect(discardedChunkCount == 0)
+        #expect(await transcriber.acknowledgeReconnectDiscard(sequence: sequence) == 0)
         try await transcriber.send(freshFrame)
         await second.enqueue(.text(
             #"{"code":0,"sentences":{"sentence_list":[{"sentence":"新内容","sentence_type":1,"sentence_id":0,"speaker_id":1,"start_time":0,"end_time":200}]}}"#
@@ -481,6 +481,49 @@ struct TencentLiveTranscriberTests {
         let freshFrame = Data(repeating: 4, count: 6_400)
         try await transcriber.send(freshFrame)
         #expect(await second.sentMessages == [.data(freshFrame)])
+        await transcriber.cancel()
+    }
+
+    @Test("非整除回调块跨帧消费后只计未发送的源块")
+    func countsOnlyUnsentSourceChunksAcrossFrameBoundaries() async throws {
+        let first = FakeTencentWebSocketConnection(cancelCompletesBlockedSend: false)
+        let second = FakeTencentWebSocketConnection()
+        let transport = FakeTencentWebSocketTransport([
+            .connection(first),
+            .connection(second),
+        ])
+        let transcriber = makeTranscriber(
+            transport: transport,
+            scheduler: FakeTencentTranscriberScheduler()
+        )
+        try await transcriber.connect(configuration: configuration)
+
+        try await transcriber.send(Data(repeating: 1, count: 9_000))
+        await first.blockNextDataSend()
+        let sendTask = Task {
+            try await transcriber.send(Data(repeating: 2, count: 5_400))
+        }
+        try await waitUntil { await first.hasBlockedSend }
+
+        await first.failInbound()
+        try await waitUntil {
+            let attempts = await transport.connectionAttempts
+            let state = await transcriber.state
+            return attempts == 2 && state == .live
+        }
+        await first.completeBlockedSendSuccessfully()
+
+        guard case let .reconnectDiscardRequired(sequence, discardedChunkCount) =
+            try await sendTask.value
+        else {
+            Issue.record("Expected a reconnect discard barrier")
+            await transcriber.cancel()
+            return
+        }
+        #expect(discardedChunkCount == 1)
+        #expect(await transcriber.acknowledgeReconnectDiscard(sequence: sequence) == 1)
+        #expect(await first.sentMessages.count == 2)
+        #expect(await second.sentMessages.isEmpty)
         await transcriber.cancel()
     }
 
